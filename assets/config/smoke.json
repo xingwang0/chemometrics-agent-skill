@@ -1,0 +1,70 @@
+{
+  "_schema": "sml-config/1",
+  "_comment": "最小可跑配置：用于 selfcheck、教学和快速冒烟。约 1-2 分钟跑完全流程。",
+  "task": {
+    "type": "regression",
+    "target": ["protein"]
+  },
+  "data": {
+    "format": "wide",
+    "path": "../examples/demo_nir.csv",
+    "id_col": "sample_id",
+    "batch_col": "batch",
+    "replicate_col": "replicate",
+    "drop_cols": ["备注", "序号", "dead_band_1", "dead_band_2", "moisture_copy", "moisture_copy_noisy"],
+    "min_valid_frac": 0.5,
+    "wavelength_axis": {"start": 4000, "stop": 10000, "step": 8, "unit": "cm-1"}
+  },
+  "split": {
+    "strategy": "nested_group",
+    "outer": {"n_splits": 3, "shuffle": true},
+    "inner": {"n_splits": 2, "shuffle": true},
+    "repeats": 2
+  },
+  "preprocess": {
+    "scale": true,
+    "scale_with_mean": false,
+    "candidates": [
+      {"name": "raw", "steps": []},
+      {"name": "snv_sg1", "steps": [{"op": "snv"}, {"op": "sg", "window": 11, "polyorder": 2, "deriv": 1}]}
+    ]
+  },
+  "models": [
+    {"name": "pls", "kind": "pls", "search_type": "grid",
+     "search": {"n_components": [3, 5, 8, 10]}},
+    {"name": "ridge", "kind": "ridge", "search_type": "grid",
+     "search": {"alpha": [0.01, 0.1, 1.0, 10.0, 100.0]}}
+  ],
+  "evaluation": {
+    "bootstrap": {"n": 200, "alpha": 0.05}
+  },
+  "permutation": {
+    "enabled": true,
+    "n_perm": 20,
+    "mode": "fast"
+  },
+  "ad": {
+    "enabled": true,
+    "methods": ["pca_t2", "knn"],
+    "pca_max_comp": 8,
+    "knn_k": 3
+  },
+  "interp": {
+    "enabled": true,
+    "perm_repeats": 3,
+    "band_size": 40,
+    "top_k": 10,
+    "shap": "off"
+  },
+  "report": {
+    "lang": ["zh"],
+    "dpi": 150,
+    "formats": ["png"],
+    "title": "合成 NIR 蛋白质定量（演示）"
+  },
+  "runtime": {
+    "n_jobs": 1,
+    "seed": 42,
+    "save_models": "last"
+  }
+}

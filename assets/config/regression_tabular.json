@@ -1,0 +1,89 @@
+{
+  "_schema": "sml-config/1",
+  "_comment": "普通表格回归预设：特征数不多（几十列）、无需光谱预处理。适用于实验设计(DoE)、工艺参数-性能响应等场景。data.path 留空时必须用 --data 指定文件。",
+  "task": {
+    "type": "regression",
+    "target": ["性能指标"]
+  },
+  "data": {
+    "format": "wide",
+    "path": "",
+    "sheet": 0,
+    "id_col": "sample_id",
+    "batch_col": "batch",
+    "replicate_col": null,
+    "drop_cols": [],
+    "min_valid_frac": 0.7,
+    "wavelength_axis": null
+  },
+  "split": {
+    "group_col": "sample_id",
+    "strategy": "nested_group",
+    "outer": {"n_splits": 5, "shuffle": true},
+    "inner": {"n_splits": 3, "shuffle": true},
+    "repeats": 5
+  },
+  "preprocess": {
+    "scale": true,
+    "scale_with_mean": true,
+    "candidates": [
+      {"name": "raw", "steps": []},
+      {"name": "log1p", "steps": [{"op": "normalize", "mode": "l2"}]}
+    ]
+  },
+  "models": [
+    {
+      "name": "pls", "kind": "pls", "search_type": "grid",
+      "search": {"n_components": [1, 2, 3, 5, 8]}
+    },
+    {
+      "name": "ridge", "kind": "ridge", "search_type": "random", "n_iter": 20,
+      "search": {"alpha": {"dist": "loguniform", "low": 0.001, "high": 1000.0}}
+    },
+    {
+      "name": "rf", "kind": "rf", "search_type": "random", "n_iter": 30,
+      "search": {
+        "n_estimators": [300, 600],
+        "max_depth": [null, 5, 10, 20],
+        "min_samples_leaf": [1, 2, 4, 8],
+        "max_features": ["sqrt", 0.3, 0.6, 1.0]
+      }
+    },
+    {
+      "name": "gbr", "kind": "gbr", "search_type": "random", "n_iter": 30,
+      "search": {
+        "n_estimators": [100, 200, 400],
+        "learning_rate": {"dist": "loguniform", "low": 0.01, "high": 0.3},
+        "max_depth": [2, 3, 4, 5],
+        "subsample": [0.7, 0.9, 1.0]
+      }
+    },
+    {
+      "name": "gp", "kind": "gp", "search_type": "random", "n_iter": 10,
+      "search": {"alpha": {"dist": "loguniform", "low": 1e-08, "high": 1e-01}}
+    }
+  ],
+  "evaluation": {
+    "metrics": ["r2", "rmse", "mae", "bias", "rpd", "ccc", "slope"],
+    "bootstrap": {"n": 2000, "alpha": 0.05}
+  },
+  "permutation": {"enabled": true, "n_perm": 200, "mode": "fast"},
+  "ad": {
+    "enabled": true,
+    "methods": ["pca_t2", "pca_q", "knn", "leverage"],
+    "quantile": 0.95,
+    "pca_max_comp": 10,
+    "knn_k": 5
+  },
+  "interp": {
+    "enabled": true,
+    "perm_repeats": 10,
+    "band_size": 1,
+    "top_k": 20,
+    "vip": true,
+    "coef_stability": true,
+    "shap": "auto"
+  },
+  "report": {"lang": ["zh", "en"], "dpi": 300, "formats": ["png", "pdf"]},
+  "runtime": {"n_jobs": -1, "seed": 42, "mem_guard_gb": 2.0, "save_models": "last"}
+}

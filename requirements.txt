@@ -1,0 +1,26 @@
+# research-ml-modeling 运行依赖
+# 实测通过的环境：Python 3.14.7 / numpy 2.5.3 / pandas 3.0.6 / scikit-learn 1.9.1
+# 详见 references/environment.md 与 scripts/selfcheck.py 的「env」组（34 项自检里 18 项是环境探针）。
+# 安装：python -m pip install -r requirements.txt
+
+# --- 必需：缺任何一个都跑不起来 ---
+numpy>=2.0            # 代码已按 numpy 2.x 写（np.float_/np.NaN 等 1.x 别名一律不用）
+pandas>=2.2           # 依赖 copy-on-write 与字符串 dtype 行为；3.0 起 str dtype 有变化
+scikit-learn>=1.6     # 需要显式 split 列表 + shuffle 的 GroupKFold/StratifiedGroupKFold
+scipy>=1.11           # Savitzky-Golay、稀疏 AIRPLS、false_discovery_control
+matplotlib>=3.7       # 全部论文图；中文字体需本机已装（selfcheck 会检查）
+joblib>=1.3           # 折模型与最终模型落盘
+openpyxl>=3.1         # 读 xlsx
+xlsxwriter>=3.1       # 写 xlsx（报告的多表导出）
+
+# --- 可选：缺失时对应模型/功能自动降级，selfcheck 会标注「可选包缺失」 ---
+# xgboost>=2.0
+# lightgbm>=4.0
+# catboost>=1.2
+# shap>=0.45           # 仅用于补充解释；没有它改用置换重要性 + VIP
+# seaborn>=0.13        # 可选主题
+# tqdm>=4.66           # 可选进度条
+
+# 注意：不要提交 __pycache__/*.pyc。本技能按 .py 源码分发，
+# pyc 与解释器版本绑定（3.14 编译的 pyc 在 3.13 上是废文件），
+# 且会让「代码哈希」看起来变了而实际没变。

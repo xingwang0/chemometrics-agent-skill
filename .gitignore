@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+
+# 运行产物（不要提交，体积大且可用代码重算）
+runs/
+*.joblib
+*.log
+
+# 编辑器 / 系统
+.ipynb_checkpoints/
+.vscode/
+.DS_Store
+Thumbs.db

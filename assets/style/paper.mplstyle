@@ -1,0 +1,22 @@
+# 论文插图统一样式（注意：字体由 utils.configure_matplotlib 负责，此处不覆盖）
+font.size: 8
+axes.labelsize: 8
+axes.titlesize: 9
+legend.fontsize: 7
+xtick.labelsize: 7.5
+ytick.labelsize: 7.5
+axes.linewidth: 0.8
+axes.grid: False
+grid.linewidth: 0.5
+grid.alpha: 0.25
+lines.linewidth: 1.2
+lines.markersize: 4
+legend.frameon: False
+axes.spines.top: False
+axes.spines.right: False
+xtick.direction: in
+ytick.direction: in
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+figure.autolayout: False
+image.cmap: viridis

@@ -1,0 +1,102 @@
+{
+  "_schema": "sml-config/1",
+  "_comment": "分类预设（如合格/不合格、相识别、失效判定）。注意：不做 SMOTE 过采样（科研上更推荐 class_weight + 阈值调优，避免合成样本污染验证）。本预设假定特征数不大（几十列）；若是 700+ 维光谱，改用 regression_spectra.json 并把 task.type 改成 classification、砍掉慢模型（svc/xgb），否则一次完整运行可能要数十分钟。data.path 留空时必须用 --data 指定文件。",
+  "task": {
+    "type": "classification",
+    "target": ["label"],
+    "positive_label": "不合格",
+    "label_order": ["合格", "不合格"]
+  },
+  "data": {
+    "format": "wide",
+    "path": "",
+    "sheet": 0,
+    "id_col": "sample_id",
+    "batch_col": "batch",
+    "replicate_col": null,
+    "drop_cols": [],
+    "min_valid_frac": 0.5,
+    "wavelength_axis": null
+  },
+  "split": {
+    "group_col": "sample_id",
+    "strategy": "nested_group",
+    "outer": {"n_splits": 5, "shuffle": true},
+    "inner": {"n_splits": 3, "shuffle": true},
+    "repeats": 5,
+    "stratify": true
+  },
+  "preprocess": {
+    "scale": true,
+    "scale_with_mean": true,
+    "candidates": [
+      {"name": "raw", "steps": []},
+      {"name": "snv", "steps": [{"op": "snv"}]},
+      {"name": "sg1_snv", "steps": [
+        {"op": "sg", "window": 11, "polyorder": 2, "deriv": 1},
+        {"op": "snv"}
+      ]}
+    ]
+  },
+  "models": [
+    {
+      "name": "plsda", "kind": "pls", "search_type": "grid",
+      "search": {"n_components": [2, 3, 5, 8, 10]}
+    },
+    {
+      "name": "logreg", "kind": "logreg", "search_type": "random", "n_iter": 20,
+      "search": {"C": {"dist": "loguniform", "low": 0.001, "high": 1000.0}}
+    },
+    {
+      "name": "svc", "kind": "svc", "search_type": "random", "n_iter": 30,
+      "search": {
+        "C": {"dist": "loguniform", "low": 0.1, "high": 1000.0},
+        "gamma": {"dist": "loguniform", "low": 0.0001, "high": 0.1}
+      }
+    },
+    {
+      "name": "rf", "kind": "rf", "search_type": "random", "n_iter": 30,
+      "search": {
+        "n_estimators": [300, 600],
+        "max_depth": [null, 5, 10],
+        "min_samples_leaf": [1, 2, 4],
+        "max_features": ["sqrt", 0.3]
+      }
+    },
+    {
+      "name": "xgb", "kind": "xgb", "search_type": "random", "n_iter": 30,
+      "search": {
+        "n_estimators": {"dist": "int", "low": 200, "high": 700},
+        "max_depth": [3, 4, 5],
+        "learning_rate": {"dist": "loguniform", "low": 0.01, "high": 0.3},
+        "colsample_bytree": [0.3, 0.5, 0.8]
+      }
+    },
+    {
+      "name": "lda", "kind": "lda", "search_type": "none", "search": {}
+    }
+  ],
+  "evaluation": {
+    "metrics": ["auc", "auprc", "balanced_accuracy", "f1_macro", "mcc", "brier", "sensitivity", "specificity"],
+    "bootstrap": {"n": 1000, "alpha": 0.05}
+  },
+  "permutation": {"enabled": true, "n_perm": 200, "mode": "fast"},
+  "ad": {
+    "enabled": true,
+    "methods": ["pca_t2", "pca_q", "knn", "leverage"],
+    "quantile": 0.95,
+    "pca_max_comp": 10,
+    "knn_k": 5
+  },
+  "interp": {
+    "enabled": true,
+    "perm_repeats": 10,
+    "band_size": 25,
+    "top_k": 20,
+    "vip": true,
+    "coef_stability": true,
+    "shap": "auto"
+  },
+  "report": {"lang": ["zh", "en"], "dpi": 300, "formats": ["png", "pdf"]},
+  "runtime": {"n_jobs": -1, "seed": 42, "mem_guard_gb": 4.0, "save_models": "last"}
+}

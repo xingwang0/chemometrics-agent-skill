@@ -1,0 +1,140 @@
+{
+  "_schema": "sml-config/1",
+  "_comment": "光谱 + 配方/工艺参数的回归主预设（近红外/红外/拉曼/XRD/UV-Vis 通用）。使用前只需改 data.path / data.id_col / task.target。data.path 留空时必须用 --data 指定文件；也可填相对本文件所在目录的路径（如 ../examples/demo_nir.csv）。",
+  "task": {
+    "type": "regression",
+    "target": ["含量"]
+  },
+  "data": {
+    "format": "wide",
+    "path": "",
+    "sheet": 0,
+    "id_col": "sample_id",
+    "batch_col": "batch",
+    "replicate_col": null,
+    "feature_mode": "all_numeric_except_roles",
+    "drop_cols": ["备注", "采集人", "文件名"],
+    "min_valid_frac": 0.5,
+    "wavelength_axis": {"start": 4000, "stop": 10000, "step": 4, "unit": "cm-1"}
+  },
+  "split": {
+    "group_col": "sample_id",
+    "strategy": "nested_group",
+    "outer": {"n_splits": 5, "shuffle": true},
+    "inner": {"n_splits": 3, "shuffle": true},
+    "repeats": 5,
+    "stratify": false,
+    "holdout_batch": null
+  },
+  "preprocess": {
+    "scale": true,
+    "scale_with_mean": false,
+    "candidates": [
+      {"name": "raw", "steps": []},
+      {"name": "snv", "steps": [{"op": "snv"}]},
+      {"name": "sg1_snv", "steps": [
+        {"op": "sg", "window": 11, "polyorder": 2, "deriv": 1},
+        {"op": "snv"}
+      ]},
+      {"name": "airpls_sg1_snv", "steps": [
+        {"op": "airpls", "lam": 100000.0, "order": 2, "max_iter": 20},
+        {"op": "sg", "window": 15, "polyorder": 2, "deriv": 1},
+        {"op": "snv"}
+      ]},
+      {"name": "msc_sg1", "steps": [
+        {"op": "msc"},
+        {"op": "sg", "window": 11, "polyorder": 2, "deriv": 1}
+      ]}
+    ]
+  },
+  "models": [
+    {
+      "name": "pls", "kind": "pls", "search_type": "grid",
+      "search": {"n_components": [3, 5, 8, 10, 12, 15, 20, 25]}
+    },
+    {
+      "name": "ridge", "kind": "ridge", "search_type": "random", "n_iter": 20,
+      "search": {"alpha": {"dist": "loguniform", "low": 0.01, "high": 10000.0}}
+    },
+    {
+      "name": "enet", "kind": "enet", "search_type": "random", "n_iter": 25,
+      "search": {
+        "alpha": {"dist": "loguniform", "low": 0.0001, "high": 1.0},
+        "l1_ratio": [0.1, 0.5, 0.9]
+      }
+    },
+    {
+      "name": "svr", "kind": "svr", "search_type": "random", "n_iter": 30,
+      "search": {
+        "C": {"dist": "loguniform", "low": 0.1, "high": 1000.0},
+        "gamma": {"dist": "loguniform", "low": 0.0001, "high": 0.1},
+        "epsilon": [0.01, 0.05, 0.1, 0.2]
+      }
+    },
+    {
+      "name": "xgb", "kind": "xgb", "search_type": "random", "n_iter": 40,
+      "search": {
+        "n_estimators": {"dist": "int", "low": 200, "high": 900},
+        "max_depth": [3, 4, 5, 6],
+        "learning_rate": {"dist": "loguniform", "low": 0.01, "high": 0.3},
+        "subsample": [0.6, 0.8, 1.0],
+        "colsample_bytree": [0.2, 0.4, 0.7, 1.0],
+        "reg_lambda": {"dist": "loguniform", "low": 0.01, "high": 100.0}
+      }
+    },
+    {
+      "name": "lgbm", "kind": "lgbm", "search_type": "random", "n_iter": 40,
+      "search": {
+        "n_estimators": {"dist": "int", "low": 200, "high": 900},
+        "num_leaves": [7, 15, 31],
+        "learning_rate": {"dist": "loguniform", "low": 0.01, "high": 0.3},
+        "colsample_bytree": [0.2, 0.4, 0.7, 1.0],
+        "reg_lambda": {"dist": "loguniform", "low": 0.01, "high": 100.0}
+      }
+    }
+  ],
+  "evaluation": {
+    "metrics": ["r2", "rmse", "mae", "bias", "rpd", "rpiq", "ccc", "slope"],
+    "bootstrap": {"n": 2000, "alpha": 0.05, "mode": "percentile"}
+  },
+  "permutation": {
+    "enabled": true,
+    "n_perm": 200,
+    "mode": "fast",
+    "alpha": 0.05
+  },
+  "ad": {
+    "enabled": true,
+    "methods": ["pca_t2", "pca_q", "knn", "leverage"],
+    "alpha": 0.05,
+    "quantile": 0.95,
+    "pca_variance": 0.95,
+    "pca_max_comp": 10,
+    "knn_k": 5,
+    "combine": "any"
+  },
+  "interp": {
+    "enabled": true,
+    "perm_repeats": 10,
+    "band_size": 25,
+    "top_k": 20,
+    "vip": true,
+    "coef_stability": true,
+    "shap": "auto"
+  },
+  "report": {
+    "lang": ["zh", "en"],
+    "dpi": 300,
+    "formats": ["png", "pdf"],
+    "title": null,
+    "authors": null
+  },
+  "runtime": {
+    "n_jobs": -1,
+    "seed": 42,
+    "mem_guard_gb": 6.0,
+    "save_models": "last",
+    "verbose": true,
+    "fail_fast": false
+  }
+}

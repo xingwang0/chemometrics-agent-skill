@@ -1,0 +1,8 @@
+# 统一换行符，跨平台 clone 后行为一致
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.pdf binary
+*.xlsx binary
+*.joblib binary
