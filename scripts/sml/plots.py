@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """论文级图表（8 张）。全部 matplotlib + Agg，同时导出 PNG 与 PDF（矢量）。
 
 为什么不用 plotly

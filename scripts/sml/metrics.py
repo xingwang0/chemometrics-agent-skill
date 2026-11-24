@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """指标计算与不确定度。
 
 三个必须守住的方法学细节

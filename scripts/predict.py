@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """用已完成的 run 预测新样品（含适用域判定）。
 
 典型用法

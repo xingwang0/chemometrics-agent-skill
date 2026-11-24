@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """光谱预处理算子与 sklearn 兼容封装。
 
 三条硬规则（违反任一条就会让结果虚高）

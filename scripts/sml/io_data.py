@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """数据读取与列角色解析。
 
 职责边界：只负责把「用户手上的表格」变成干净的 (X, y, groups, batch, ...)，

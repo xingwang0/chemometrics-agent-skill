@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """stage 2：嵌套分组重复交叉验证。
 
 产出（全部落在 <run>/cv/）

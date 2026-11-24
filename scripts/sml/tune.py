@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """内层调参：把搜索空间展开成候选参数字典，用 GridSearchCV 在显式 split 列表上搜。
 
 为什么不用 RandomizedSearchCV

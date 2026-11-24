@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """生成两套合成数据，用于 selfcheck 与新手教学。
 
 1. ``demo_nir.csv``      —— 拟真的近红外光谱 + 成分标签，含 3 次重复测量、4 个批次，

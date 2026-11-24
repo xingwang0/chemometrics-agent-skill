@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """数据审计：样本量、分组结构、缺失、近零方差、共线性、目标泄漏、EPV、CV 方案建议。
 
 审计的定位是"在花四小时训练之前，先把会让结论作废的问题摆到桌面上"。

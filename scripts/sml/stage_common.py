@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """各 stage 脚本的公共前置：命令行参数、配置解析、数据载入、run 目录与 provenance。
 
 每个 stage_*.py 都通过这里接入，保证：

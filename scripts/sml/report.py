@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """报告装配：表格（CSV+XLSX）、Markdown 主报告、中英 Methods 草稿、审稿质疑应对清单。
 
 设计原则

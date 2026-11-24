@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """stage 6：报告装配（图 + 表 + Markdown + Methods 草稿 + 审稿清单）。
 
 产物

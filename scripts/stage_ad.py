@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """stage 4：适用域（AD）建模与有效性验证。
 
 产物

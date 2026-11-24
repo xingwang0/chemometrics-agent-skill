@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """一键入口：从原始表格跑到论文级图表 + Methods 草稿 + 审稿质疑清单。
 
 典型用法

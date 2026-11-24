@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """模型工厂：估计器、默认搜索空间、Pipeline 组装。
 
 关键约定

@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """从 CV 产物里挑"代表模型"及其超参。多个 stage（perm / interp / report）共用。"""
 
 from __future__ import annotations

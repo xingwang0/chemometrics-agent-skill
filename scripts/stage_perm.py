@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """stage 3：Y-randomization 置换检验。
 
 回答"你的模型是不是在拟合噪声"。化学计量学审稿的标配自证。

@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """复现锁定：版本矩阵、种子派生、数据/配置/代码三哈希。
 
 审稿人问"怎么复现"时，答案应该是 ``provenance.json`` 一个文件。

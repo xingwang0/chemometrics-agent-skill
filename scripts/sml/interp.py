@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """可解释性：波段级置换重要性、PLS VIP、跨折系数稳定性、SHAP（补充）。
 
 为什么顺序是这样

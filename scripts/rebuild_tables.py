@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """从已有的 OOF / 逐折结果重算汇总表，不重新拟合任何模型。
 
 什么时候用

@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """科研级机器学习预测建模内核（research-ml-modeling）。
 
 模块职责一览

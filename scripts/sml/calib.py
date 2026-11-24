@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """校准分析：回归的系统偏差，分类的概率校准。
 
 回归：审稿人常问"你的预测有没有系统性偏差"。回答需要

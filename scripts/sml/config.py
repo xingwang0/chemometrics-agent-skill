@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """配置加载：JSON（本机无 PyYAML）、默认值深合并、--set 点号覆盖、字段校验。
 
 设计要点

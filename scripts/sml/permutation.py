@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """Y-randomization（置换检验）与特征/波段级置换零分布。
 
 化学计量学的标准自证

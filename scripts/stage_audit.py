@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """stage 1：数据审计。
 
 产出 audit/audit.json、audit/audit.md，以及一份可直接抄的 CV 方案建议。

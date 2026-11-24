@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """适用域（Applicability Domain, AD）：判断一个新样本是否在模型可信范围内。
 
 四种方法并行，各有盲区

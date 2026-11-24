@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """通用工具：路径/编码/日志/计时/内存守卫/JSON 读写。
 
 Windows + 中文路径是本机常态，因此这里统一约定：

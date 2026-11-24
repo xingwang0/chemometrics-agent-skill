@@ -1,3 +1,5 @@
+# Copyright 2026 The research-ml-modeling Authors
+# SPDX-License-Identifier: Apache-2.0
 """三层交叉验证引擎：外层重复分组 K 折 → 内层分组 K 折调参 → 外层测试折评估。
 
 为什么要三层
