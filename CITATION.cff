@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as below."
+title: "research-ml-modeling: a reviewer-grade machine-learning pipeline for spectroscopic and tabular predictive modelling"
+abstract: >-
+  A command-line pipeline and agent skill that turns raw tabular or spectroscopic data into a
+  publication-ready modelling report: data audit, nested grouped repeated cross-validation,
+  Y-randomization permutation tests, four applicability-domain methods with validity testing,
+  cluster-bootstrap confidence intervals, publication-quality figures, a draft Methods paragraph
+  and a reviewer-response checklist. Every reported number is recomputable from the pooled
+  out-of-fold predictions, and provenance is pinned by three hashes.
+type: software
+authors:
+  - name: "xingwang0"
+    website: "https://github.com/xingwang0"
+repository-code: "https://github.com/xingwang0/research-ml-modeling"
+url: "https://github.com/xingwang0/research-ml-modeling"
+license: Apache-2.0
+version: "1.1.1"
+date-released: "2026-11-25"
+keywords:
+  - chemometrics
+  - spectroscopy
+  - near-infrared
+  - PLS regression
+  - applicability domain
+  - cross-validation
+  - reproducible research
+  - machine learning

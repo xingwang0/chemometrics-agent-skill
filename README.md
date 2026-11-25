@@ -4,6 +4,12 @@
 
 面向材料、化学、光谱（NIR / FTIR / Raman / XRD / XPS / UV-Vis）与配方工艺参数等表格数据的回归与分类。也适用于任何"样本少、维度高、同一批次/同一样品测了多次"的实验数据。
 
+> **这是一个 Agent Skill，不是要你自己敲命令的 CLI。**
+> 装进支持 Agent Skills 的 agent（Claude Code、Codex、Cursor、DeepSeek Harness 等）之后，
+> 你只要说「用这批 NIR 数据做个水分预测，按审稿标准来」，agent 会自己读 `SKILL.md`、
+> 判断该走哪几个 stage、跑脚本、把 Gate 拦住的问题原话报给你。
+> 下面「快速开始」里那些命令是**给 agent 调的**，也是你想自己复核时的入口——不是使用前提。
+
 ---
 
 ## 它解决什么
@@ -23,10 +29,35 @@
 | 适用域被判定无效 | 禁止宣称模型可外推，写入 limitations |
 | 最优模型与次优差异不显著 | 全文只能写「性能相当」，不许写「X 优于 Y」 |
 
+## 安装
+
+**方式一：作为 skill 装进 agent（推荐）**
+
+```bash
+# 克隆到 agent 的 skills 目录（按你的 agent 换成实际路径）
+git clone https://github.com/xingwang0/research-ml-modeling ~/.claude/skills/research-ml-modeling
+# Claude Code  ~/.claude/skills/    DeepSeek Harness  ~/.dsh/skills/
+```
+
+已经有一份本地工作副本、又想跟着 git 更新时，用目录链接代替拷贝：
+
+```bash
+# Windows（cmd）：建 junction，不占额外空间
+mklink /J "%USERPROFILE%\.dsh\skills\research-ml-modeling" "D:\path\to\research-ml-modeling"
+# macOS / Linux
+ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
+```
+
+装好后**新开一个会话**——skill 列表在会话启动时加载，当前会话看不到。
+
+需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（34 项）确认环境。
+
+**方式二：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
+
 ## 快速开始
 
 ```bash
-# 下载或克隆本仓库后，进入仓库根目录执行以下命令
+# 在仓库根目录执行（agent 内部也是这么调的）
 
 # 1) 先验环境：34 项自检（换机必跑）
 python scripts/selfcheck.py
@@ -126,4 +157,4 @@ Apache License 2.0，见 `LICENSE` 与 `NOTICE`。允许商用与修改，须保
 
 本项目**未针对**监管申报（ICH / USP / CLSI / GB）、临床诊断、生产实时控制等场景做过验证，不要把管线输出直接当作上述用途的判定依据。**作者不对据此作出的科研结论、生产决策、监管申报或商业交付承担任何责任。** 上述免责受适用法律约束；中国法下依法不得排除的责任（故意或重大过失致财产损失）不因本声明而免除。
 
-引用时请注明版本号与对应 run 目录下 `provenance.json` 的三哈希。
+引用时请注明版本号（对应 GitHub Release，如 `v1.1.1`）与对应 run 目录下 `provenance.json` 的三哈希。机器可读的引用信息见 `CITATION.cff`。
