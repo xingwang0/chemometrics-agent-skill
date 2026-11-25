@@ -962,12 +962,432 @@ def _repeats_degrade() -> tuple[bool, str]:
 
 
 # --------------------------------------------------------------------------- #
+# 展示层组：格式规格 / 措辞守卫 / HTML 结构 / 图件完整性
+#
+# 这些断言存在的理由很朴素：精度、单位、措辞、"图有没有误导性"如果只写在文档里，
+# 半年后就会各自漂移。把它们写成会失败的断言，才有机会在下一次改动时被拦下。
+# --------------------------------------------------------------------------- #
+_FIXTURES: dict[str, Any] = {}
+_TMPDIRS: list[Any] = []
+
+
+def _mini_html(unit="%"):
+    """构造一个最小 run 并渲染 HTML，返回 (ctx, html, figures)。结果缓存复用。"""
+    key = f"html::{unit}"
+    if key in _FIXTURES:
+        return _FIXTURES[key]
+    from sml.config import resolve_config
+    from sml.io_data import load_dataset
+    from sml.report_html import build_html
+    from sml.stage_common import RunContext
+
+    cfg = resolve_config(ASSETS / "config" / "smoke.json", budget="fast")
+    cfg["data"]["target_unit"] = unit
+    ds, _ = load_dataset(cfg)
+    td = tempfile.TemporaryDirectory()
+    _TMPDIRS.append(td)
+    ctx = RunContext(cfg, ds, as_path(td.name))
+    ensure_dir(ctx.run_dir / "figures")
+
+    png = ctx.run_dir / "figures" / "F1_pred_vs_obs.png"
+    plt = configure_matplotlib()
+    f = plt.figure(figsize=(1, 1))
+    plt.plot([0, 1], [0, 1])
+    f.savefig(png, dpi=20)
+    plt.close(f)
+
+    t2 = pd.DataFrame([{
+        "target": "protein", "model": "ridge", "r2_mean": 0.9712345678,
+        "r2_sd": 0.0031944, "rmse_mean": 0.5640612, "rmse_sd": 0.0064383,
+        "rpd_mean": 5.87, "metric_basis": "fold", "n_folds_ok": 9,
+        "n_folds_degenerate": 0, "rank": 1,
+    }])
+    block = {
+        "task": "regression", "model": "ridge", "basis": "fold", "n_folds_ok": 9,
+        "r2": 0.9712345678, "rmse": 0.5640612, "mae": 0.4354, "rpd": 5.87,
+        "ci": {"r2": (0.9578, 0.9802)},
+        "_best_line": "最优模型：**ridge**（与次优性能相当）",
+        "_limitations": ["- 数据未提供批次信息，**跨批次外推未经验证**。"],
+    }
+    out = build_html(ctx, "ridge", {"T2_performance": t2}, block,
+                     figures={"F1": [str(png)]}, out_dir=ctx.sub("report"))
+    html_text = Path(out).read_text(encoding="utf-8")
+    _FIXTURES[key] = (ctx, html_text, {"F1": [str(png)]})
+    return _FIXTURES[key]
+
+
+@check("present", "零值不得显示成 0.0000 / -0.000（否则读者以为「测到了极小的量」）")
+def _p_zeros() -> tuple[bool, str]:
+    from sml import present as p
+
+    bad = []
+    for field in ("r2", "rmse", "rpd", "delta"):
+        for v in (0, -0.0, 0.0):
+            txt = p.fmt(field, v)
+            if txt != "0":
+                bad.append(f"{field}({v})={txt}")
+    if bad:
+        return _fail("零值被渲染成 " + "、".join(bad))
+    return _ok("0 / -0.0 一律渲染为 0；-0.000 与 0.0000 结构上不可能出现")
+
+
+@check("present", "有量纲误差量用有效数字（不是固定小数位）")
+def _p_sigfig() -> tuple[bool, str]:
+    from sml import present as p
+
+    cases = [("rmse", 12.3456, "12.35"), ("rmse", 0.0123456, "0.01235"),
+             ("rmse", 1234.5, "1234")]
+    for field, v, want in cases:
+        got = p.fmt(field, v)
+        if got != want:
+            return _fail(f"{field}({v}) 得到 {got}，应为 {want}（4 位有效数字）")
+    if p.fmt("r2", 0.9712345678) != "0.971":
+        return _fail(f"r2 应为 3 位小数，得到 {p.fmt('r2', 0.9712345678)}")
+    return _ok("RMSE/MAE 走 4 位有效数字，R²/AUC 走 3 位小数")
+
+
+@check("present", "p 值不得写成 0.0000（置换检验有硬下限 1/(1+n_perm)）")
+def _p_pvalue() -> tuple[bool, str]:
+    from sml import present as p
+
+    if p.fmt_p(2e-4) != "< 0.001":
+        return _fail(f"p=0.0002 应写成 < 0.001，得到 {p.fmt_p(2e-4)}")
+    if p.fmt_p(1.0) != "> 0.999":
+        return _fail(f"p=1.0 应写成 > 0.999，得到 {p.fmt_p(1.0)}")
+    if p.fmt_p(0.0432) != "0.043":
+        return _fail(f"p=0.0432 应为 0.043，得到 {p.fmt_p(0.0432)}")
+    return _ok("p<0.001 与 p>0.999 用不等号，其余 3 位小数")
+
+
+@check("present", "缺值/非有限值降级为破折号且带原因码")
+def _p_missing() -> tuple[bool, str]:
+    from sml import present as p
+
+    cases = [(None, "missing"), (float("nan"), "not_finite"),
+             (float("inf"), "not_finite"), ("abc", "not_numeric")]
+    for v, reason in cases:
+        f = p.fmt_detail("r2", v)
+        if f.text != "—":
+            return _fail(f"{v!r} 未降级为破折号，得到 {f.text!r}")
+        if f.reason != reason:
+            return _fail(f"{v!r} 的原因码应为 {reason}，得到 {f.reason!r}")
+    return _ok("None/NaN/inf/非数值都降级为 —，并记录 missing/not_finite/not_numeric")
+
+
+@check("present", "未配置目标单位时，报告必须显式暴露（不得静默省略）")
+def _p_unit_missing() -> tuple[bool, str]:
+    from sml import present as p
+
+    if p.normalize_unit(None)[1] != "missing":
+        return _fail("None 应判定为 missing")
+    if p.unit_suffix(None, "mpl") != "单位未指定":
+        return _fail("图内单位缺失时必须写出来，否则 RMSE 成了无量纲数字")
+    _ctx, html, _fig = _mini_html(unit=None)
+    if "单位未指定" not in html:
+        return _fail("HTML 未出现「单位未指定」")
+    if "unit-missing" not in html:
+        return _fail("缺少醒目的 unit-missing 样式标记")
+    if "sev-blocking" not in html:
+        return _fail("缺少 blocking 级徽标，读者不会注意到量纲缺失")
+    return _ok("单位缺失 → 破折号占位 + 红色标记 + blocking 徽标，三处同时可见")
+
+
+@check("present", "措辞守卫必须抓住「证明」「完全准确」「无 p 值的显著优于」")
+def _p_guard() -> tuple[bool, str]:
+    from sml import present as p
+
+    f1 = p.guard_text("模型完全准确，证明了该波段决定蛋白含量。")
+    rules = {f.rule for f in f1}
+    if not {"prove", "perfect"} <= rules:
+        return _fail(f"漏抓：{sorted(rules)}")
+    weak = p.Evidence(significant=True, p_bh=0.2)
+    if not any(f.rule == "significant_claim" for f in p.guard_text("该方法显著优于 PLS。", weak)):
+        return _fail("BH 校正 p=0.2 时仍放过「显著优于」")
+    ok_ev = p.Evidence(significant=True, p_bh=0.01)
+    if any(f.rule == "significant_claim" for f in p.guard_text("显著优于 PLS（p=0.01）。", ok_ev)):
+        return _fail("有 p<0.05 证据时误报「显著优于」")
+    # 否定句里的告诫不能被判成越界声明，否则守卫天天误报、最后没人看
+    if p.guard_text("不得宣称模型可安全外推"):
+        return _fail("把「不得宣称可安全外推」这句正确的告诫判成了违规")
+    return _ok("抓到 prove/perfect/significant_claim，且正确放过否定句与有证据的表述")
+
+
+@check("present", "HTML 必须具备离线可读与语义化结构（零外链、零 JS）")
+def _p_html_struct() -> tuple[bool, str]:
+    _ctx, html, _fig = _mini_html()
+    need = ['<!doctype html>', 'lang="zh-CN"', 'name="viewport"', "@media print",
+            "<caption", 'scope="col"', 'scope="row"', "<thead>"]
+    miss = [n for n in need if n not in html]
+    if miss:
+        return _fail(f"缺结构要素：{miss}")
+    if "<script" in html.lower():
+        return _fail("页面含 <script>：离线/审稿系统里会失效或被执行策略拦掉")
+    import re as _re
+    ext = _re.findall(r'(?:src|href)="https?://[^"]+', html)
+    if ext:
+        return _fail(f"存在外链资源（断网即塌陷）：{ext[:3]}")
+    return _ok("doctype/lang/viewport/打印样式/表头 scope 齐备；无脚本、无外链")
+
+
+@check("present", "HTML 里不得出现 nan / None / <NA> 这些 pandas 字面量")
+def _p_html_dirty() -> tuple[bool, str]:
+    import re as _re
+
+    _ctx, html, _fig = _mini_html()
+    hits = _re.findall(r">\s*(nan|NaN|None|<NA>|NaT)\s*<", html)
+    if hits:
+        return _fail(f"漏进页面 {len(hits)} 处，例如 {hits[:3]}")
+    return _ok("脏值全部在 _cell 边界转成了破折号")
+
+
+@check("present", "data-raw 必须是未舍入原值，且能反推出显示文本")
+def _p_html_raw() -> tuple[bool, str]:
+    import re as _re
+
+    from sml import present as p
+
+    _ctx, html, _fig = _mini_html()
+    m = _re.search(r'data-field="r2" data-raw="([^"]+)"[^>]*>([^<]+)<', html)
+    if not m:
+        return _fail("T2 的 R² 单元格没有 data-raw（读者无法追溯原始值）")
+    raw, text = float(m.group(1)), m.group(2)
+    if abs(raw - 0.9712345678) > 1e-12:
+        return _fail(f"data-raw 被舍入过：{raw!r}（应为 0.9712345678）")
+    if p.fmt("r2", raw) != text:
+        return _fail(f"显示文本 {text!r} 与 fmt(raw)={p.fmt('r2', raw)!r} 不一致")
+    return _ok(f"data-raw={raw!r} 保持全精度；显示文本可由 raw 单向推出")
+
+
+@check("present", "图路径真实存在、徽标有图例、渲染层不手写小数位")
+def _p_html_assets() -> tuple[bool, str]:
+    import re as _re
+
+    from sml import present as p
+
+    ctx, html, _fig = _mini_html()
+    srcs = _re.findall(r'src="(\.\./figures/[^"]+)"', html)
+    if not srcs:
+        return _fail("页面没有引用任何图")
+    for s in srcs:
+        target = ctx.run_dir / "report" / s
+        if not Path(target).resolve().exists():
+            return _fail(f"图路径不存在（会显示裂图）：{s}")
+    used = set(_re.findall(r'class="badge sev-(\w+)"', html))
+    legend = p.legend("html")
+    for sev in used:
+        if f"sev-{sev}" not in legend:
+            return _fail(f"页面上用了 {sev} 级徽标，但图例里没有这一条")
+    here = Path(__file__).resolve().parent / "sml"
+    for name in ("report_html.py",):
+        body = (here / name).read_text(encoding="utf-8")
+        bad = _re.findall(r':\.\d+f|:\s*\.\d+%', body)
+        if bad:
+            return _fail(f"{name} 里仍有手写小数位 {bad[:3]}，会绕过规格层")
+    return _ok(f"{len(srcs)} 个图路径全部存在；徽标级别 ⊆ 图例；渲染层无手写精度")
+
+
+def _qc_fig():
+    return configure_matplotlib()
+
+
+@check("figure_qc", "双 y 轴必须被拦住（可让任意两条曲线看起来相关）")
+def _q1_twin() -> tuple[bool, str]:
+    from sml.plots import figure_qc
+
+    plt = _qc_fig()
+    fig, ax = plt.subplots()
+    ax.plot([1, 2], [1, 2])
+    ax.set_xlabel("x"); ax.set_ylabel("y")
+    ax.twinx().plot([1, 2], [3, 4])
+    issues = figure_qc(fig, "FX")
+    plt.close(fig)
+    if not any(i.startswith("Q1") for i in issues):
+        return _fail("twinx 未被识别为双 y 轴")
+    return _ok("叠加坐标轴被判违规")
+
+
+@check("figure_qc", "柱状图截断 y 轴必须被拦住（柱长编码大小）")
+def _q2_trunc() -> tuple[bool, str]:
+    from sml.plots import figure_qc
+
+    plt = _qc_fig()
+    fig, ax = plt.subplots()
+    ax.bar([0, 1], [10.0, 10.4])
+    ax.set_ylim(9.9, 10.5)
+    ax.set_xlabel("x"); ax.set_ylabel("y")
+    bad = figure_qc(fig, "FX")
+    ax._sml_zero_declared = True
+    good = figure_qc(fig, "FX")
+    plt.close(fig)
+    if not any(i.startswith("Q2") for i in bad):
+        return _fail("截断的柱状图未被识别")
+    if any(i.startswith("Q2") for i in good):
+        return _fail("显式声明后仍报错（正确做法应该放行）")
+    return _ok("未声明的截断判违规；显式声明后放行")
+
+
+@check("figure_qc", "jet / rainbow 色标必须被拦住")
+def _q3_cmap() -> tuple[bool, str]:
+    from sml.plots import figure_qc
+
+    plt = _qc_fig()
+    fig, ax = plt.subplots()
+    ax.imshow([[1, 2], [3, 4]], cmap="jet")
+    ax.set_xlabel("x"); ax.set_ylabel("y")
+    issues = figure_qc(fig, "FX")
+    plt.close(fig)
+    if not any(i.startswith("Q3") for i in issues):
+        return _fail("jet 色标未被识别（非感知均匀，会造出假边界）")
+    return _ok("彩虹色标被判违规")
+
+
+@check("figure_qc", "箱线图不叠散点必须被拦住（会掩盖折间分布）")
+def _q4_box() -> tuple[bool, str]:
+    from sml.plots import figure_qc
+
+    plt = _qc_fig()
+    fig, ax = plt.subplots()
+    ax.boxplot([[1, 2, 3], [2, 3, 4]])
+    ax.set_xlabel("x"); ax.set_ylabel("y")
+    ax._sml_boxplot = True
+    issues = figure_qc(fig, "FX")
+    plt.close(fig)
+    if not any(i.startswith("Q4") for i in issues):
+        return _fail("只有箱体没有散点，未被识别")
+    return _ok("无散点的箱线图被判违规")
+
+
+@check("figure_qc", "数值轴缺标签 / F8 缺误差线必须被拦住")
+def _q5_labels() -> tuple[bool, str]:
+    from sml.plots import figure_qc
+
+    plt = _qc_fig()
+    fig, ax = plt.subplots()
+    ax.plot([1, 2], [1, 2])
+    bad = figure_qc(fig, "FX")
+    plt.close(fig)
+    if not any(i.startswith("Q5") for i in bad):
+        return _fail("无轴标签的数值轴未被识别")
+
+    fig, ax = plt.subplots()
+    ax.plot([1, 2], [1, 2])
+    ax.set_xlabel("RMSE"); ax.set_yticks([0, 1]); ax.set_yticklabels(["a", "b"])
+    no_err = figure_qc(fig, "F8")
+    plt.close(fig)
+    if not any("误差线" in i for i in no_err):
+        return _fail("F8 只有点估计、没有误差线，未被识别")
+    return _ok("缺轴标签与 F8 缺误差线都被判违规")
+
+
+@check("standards", "TRIPOD+AI 清单条目完整性与证据键合法性")
+def _s_items() -> tuple[bool, str]:
+    from sml.standards import AUTHOR_ONLY, EVIDENCE_FILES, load_items
+
+    items = load_items()
+    if not items:
+        return _ok("清单未安装（items 为空），按设计降级为占位；条目须人工转录，代码不生成")
+    ids = [str(i["id"]) for i in items]
+    if len(ids) != len(set(ids)):
+        return _fail(f"条目 id 重复：{ids}")
+    if len(items) != 27:
+        return _fail(f"条目数 {len(items)} ≠ 27（TRIPOD+AI 共 27 条）")
+    legal = set(EVIDENCE_FILES) | AUTHOR_ONLY
+    for it in items:
+        keys = [str(k) for k in (it.get("evidence") or [])]
+        if not keys and not str(it.get("na_reason") or "").strip():
+            return _fail(f"条目 {it['id']} 既无 evidence 也无 na_reason")
+        bad = [k for k in keys if k not in legal]
+        if bad:
+            return _fail(f"条目 {it['id']} 含非法证据键 {bad}")
+    return _ok(f"{len(items)} 条齐全，证据键全部合法")
+
+
+@check("standards", "清单渲染不得出现「符合 / 认证」的肯定表述")
+def _s_wording() -> tuple[bool, str]:
+    from sml.standards import render_section
+    from sml.stage_common import RunContext
+    from sml.config import resolve_config
+    from sml.io_data import load_dataset
+
+    cfg = resolve_config(ASSETS / "config" / "smoke.json", budget="fast")
+    ds, _ = load_dataset(cfg)
+    td = tempfile.TemporaryDirectory()
+    _TMPDIRS.append(td)
+    ctx = RunContext(cfg, ds, as_path(td.name))
+    text = render_section(ctx)
+    for kw in ("符合", "认证", "compliant"):
+        for m in __import__("re").finditer(kw, text):
+            head = text[max(0, m.start() - 12):m.start()]
+            if not any(t in head for t in ("不构成", "不声明", "不是", "非")):
+                return _fail(f"「{kw}」出现在肯定语境里：…{text[max(0, m.start()-20):m.end()+8]}…")
+    return _ok("渲染文本里没有肯定的合规声明")
+
+
+@check("reporting", "杠杆：fit 与 score 必须用同一个式子（含 +1/n 截距项）")
+def _leverage_formula() -> tuple[bool, str]:
+    from sml.ad import fit_ad
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(80, 12))
+    groups = np.repeat([f"S{i}" for i in range(40)], 2)
+    cfg = {"ad": {"methods": ["pca_t2", "pca_q", "knn", "leverage"],
+                  "pca_variance": 0.9, "pca_max_comp": 5, "knn_k": 3}}
+    ad = fit_ad(X, cfg, groups)
+    scores = ad.score(X)["leverage"].to_numpy(dtype=float)
+    diff = float(np.max(np.abs(ad.self_lev_ - scores)))
+    expected = 1.0 / len(X)
+    if diff > 1e-10:
+        # 旧实现：fit 带 +1/n、score 不带，差值恰好是 1/n。拿"带截距"的分布估阈值，
+        # 再去卡"不带截距"的分数——只有经验分位主导时才会露馅，方向是系统性偏松。
+        hint = f"（差值≈{diff:.6f}，1/n={expected:.6f}，说明少加了截距项）"
+        return _fail(f"fit 与 score 的杠杆值不一致，最大偏差 {diff:.3e}{hint}")
+    return _ok(f"两条路径的杠杆值完全一致（最大偏差 {diff:.2e}），+1/n 均未遗漏")
+
+
+@check("reporting", "h* 的两个 n 必须各自标注，且不得互相冒充")
+def _leverage_dual_n() -> tuple[bool, str]:
+    from sml.ad import fit_ad
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(90, 10))
+    groups = np.repeat([f"S{i}" for i in range(30)], 3)
+    cfg = {"ad": {"methods": ["leverage"], "pca_variance": 0.9, "pca_max_comp": 4, "knn_k": 3}}
+    ad = fit_ad(X, cfg, groups)
+    d = ad.diag_
+    need = {"n_rows", "n_groups", "h_star_rows", "h_star_groups", "leverage_q95",
+            "leverage_max", "leverage_inert", "leverage_active", "leverage_threshold"}
+    missing = need - set(d)
+    if missing:
+        return _fail(f"ad.diagnostics 缺字段 {sorted(missing)}")
+    if d["n_rows"] != 90 or d["n_groups"] != 30:
+        return _fail(f"n 统计错：rows={d['n_rows']} groups={d['n_groups']}")
+    # 3(k+1)/n 的两个口径必须只差 n 的比值，否则说明有一边算错了
+    k = d["n_components"]
+    if abs(d["h_star_rows"] - 3 * (k + 1) / d["n_rows"]) > 1e-12:
+        return _fail("h_star_rows 与 3(k+1)/n_rows 不符")
+    if abs(d["h_star_groups"] - 3 * (k + 1) / d["n_groups"]) > 1e-12:
+        return _fail("h_star_groups 与 3(k+1)/n_groups 不符")
+    if abs(d["h_star_rows"] * d["n_rows"] - d["h_star_groups"] * d["n_groups"]) > 1e-9:
+        return _fail("两个 h* 的乘积不自洽：有一边没用同一个 k")
+    # 真正判域外的那条线必须是 max(按行算的 h*, 经验分位)，不能是样品口径的 0.45
+    want = max(d["h_star_rows"], d["leverage_q95"])
+    if abs(d["leverage_threshold"] - want) > 1e-9:
+        return _fail(f"leverage_threshold={d['leverage_threshold']:.4f}，"
+                     f"应为 max(h*_rows={d['h_star_rows']:.4f}, q95={d['leverage_q95']:.4f})")
+    if d["leverage_threshold"] > d["h_star_groups"] + 1e-9:
+        return _fail("判域阈值超过了样品口径的 h*，会与 ad_scores.csv 对不上")
+    return _ok(f"行口径 {d['h_star_rows']:.3f}（n={d['n_rows']}）/ 样品口径 "
+               f"{d['h_star_groups']:.3f}（n={d['n_groups']}），各自标注且不互相冒充")
+
+
+# --------------------------------------------------------------------------- #
 def main(argv: list[str] | None = None) -> int:
     setup_console()
     ap = argparse.ArgumentParser(description="research-ml-modeling 环境自检与防泄漏回归测试")
     ap.add_argument("--only", default=None,
                     help="只跑某组：env / leakage / registry / multitarget / reporting / "
-                         "multiclass / provenance / split，逗号分隔")
+                         "multiclass / provenance / split / present / figure_qc / standards，"
+                         "逗号分隔")
     ap.add_argument("--allow-fail", action="store_true", help="有失败项也返回 0")
     ap.add_argument("--json-out", default=None, help="把结果写成 JSON")
     args = ap.parse_args(argv)

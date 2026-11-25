@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "科研级机器学习预测建模流程（材料/化学/光谱为主）。当用户要做近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，或配方/工艺参数等表格数据的回归与分类预测；要写论文 Methods、画预测散点/Williams plot/校准曲线；要算 RPD、VIP、适用域、Y-randomization 置换检验；要回答审稿人关于交叉验证、数据泄漏、过拟合、重复测量、批次效应的质疑时使用。内置分组交叉验证 + 嵌套调参 + 重复 CV + 置换检验 + 按组 bootstrap 置信区间 + 适用域四法 + 审稿质疑清单。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.1.1"
+version: "1.2.1"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
@@ -15,7 +15,25 @@ agent_created: true
 
 不适用于：纯统计假设检验（ANOVA/t 检验）、深度学习训练（本机无 torch）、图像分割、NLP。
 
-## v1.1.1 行为变更（升级前先看这一段）
+## v1.2.x 变更（升级前先看这一段）
+
+核心原则：**只改怎么显示，不改算出什么**。`cv/*.csv` 的数值与 1.1.1 逐字节相同。
+
+| 变更 | 影响 | 处理 |
+|---|---|---|
+| **新增 `report/report.html`** | 单文件响应式报告，CSS 全内联、零外链零 JS，断网/邮件附件可原样打开；`report.md` 仍在 | 无需操作；`report.html: false` 可关闭 |
+| **自检 34 → 53 项** | 新增 `present` 10、`figure_qc` 5、`standards` 2、`reporting` 杠杆口径 2 | 换机先跑 `selfcheck.py`，53/53 再动数据 |
+| **显示层收口到 `sml/present.py`** | 精度按字段裁决（R² 3 位、RPD 2 位、RMSE 4 位有效数字）；比例统一为百分数；`-0.000` 结构上不可能出现 | 只影响文字，`tables/*.csv` 与 `tables.xlsx` 的单元格值仍是未舍入 float |
+| **p 值 4 位改 3 位**，`p<0.001` / `p>0.999` 用不等号 | 置换检验的 p 有硬下限 `1/(1+n_perm)`，写 `0.0000` 是错的 | 无需操作 |
+| **图内轴标签带单位** | 需配 `data.target_unit`（如 `"%"`、`"mg/kg"`）；不填则写「单位未指定」并挂 blocking 徽标，**不再静默省略量纲** | 建议都填上 |
+| **F4 杠杆口径修复（1.2.1）** | `fit` 与 `score` 的杠杆公式差一个 `1/n`，阈值却在带 `1/n` 的分布上估；现已共用 `ad._leverage()` | `ad_scores.csv` 的 `leverage` 列整体抬高 `1/n`；`ad_flag` / `ad_majority` 不变 |
+| **`ad_reliability` 拆两个阈值** | `leverage_threshold`（判域线，与 `ad_scores.csv` 同值）与 `leverage_threshold_groups`（仅可靠性判断）分开，`h_star` 一并给出 | 无需操作 |
+| **新增 `leverage_inert` / `leverage_max`** | 杠杆法"一次都没触发"却仍计入多数票分母，原来毫无提示 | 看日志一行说明；投票规则本轮未改 |
+| **旧 run 的 `--resume` 会判失效** | 改 `.py` 会改变 `code_sha256`，这是设计意图 | 用 `--stages report` 只重跑报告，`cv/` 产物不受影响 |
+| **新增 `figure_qc` / `compliance`** | 图件六类硬伤（双 y 轴、截断纵轴、jet 色标等）与措辞违规（"证明""可外推"）会落盘并挂红色横幅 | 自检断言 `figure_qc.json` 为空 |
+| **TRIPOD+AI 清单映射** | `sml/standards.py` 只做映射与三态渲染，27 条条目**须人工转录**，当前为空骨架 | 未转录时渲染为占位说明，不生成任何条目 |
+
+## v1.1.1 行为变更（历史记录）
 
 上个版本有 8 处在「静默改变结果」或「该拦不拦」，这一版全部改成显式失败或显式告警。
 **升级后旧配置可能直接报错，这是故意的**——每条的报错里都写了怎么改。
@@ -43,7 +61,7 @@ agent_created: true
 **换机或换人**：把上面两行换成你自己的解释器与技能根，然后**先跑自检**再谈建模：
 
 ```bash
-python scripts/selfcheck.py          # 34 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性
+python scripts/selfcheck.py          # 53 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性、展示规格、图件完整性
 ```
 
 自检会逐项告诉你缺哪个包、版本差在哪、哪条 API 已移除，不需要猜。全绿之后才可能跑出可信数字。
@@ -68,7 +86,7 @@ Python 3.14.7 + sklearn 1.9.1 + xgboost/lightgbm/catboost + shap + matplotlib。
 PY="python"
 ROOT="/path/to/research-ml-modeling"
 
-# 1) 环境自检（首次/换机必跑，34 项）
+# 1) 环境自检（首次/换机必跑，53 项）
 $PY "$ROOT/scripts/selfcheck.py"
 
 # 2) 预演：只审计 + 报"要拟合多少次、大概多久"，不训练
@@ -219,8 +237,18 @@ runs/<id>/
 ├── model/                 final_model.joblib · model_card.json（全量重训，供新样品预测）
 ├── figures/F1..F8         png(300dpi) + pdf(矢量)
 ├── tables/T1..T6          csv + tables.xlsx
-└── report/                report.md · methods_zh.md · methods_en.md · reviewer_checklist.md
+└── report/                report.html（单文件响应式）· report.md · methods_zh.md ·
+                           methods_en.md · reviewer_checklist.md ·
+                           compliance.json（措辞检查）· tripod_ai_checklist.md（清单已安装时）
 ```
+
+`report.html` 与 `report.md` 十章同名同序：CSS 全内联、零外链零 JS（断网可读）、
+三档响应式断点 + A4 打印样式；图引用 `../figures/*.png` 原图；每个数字带 `data-raw`
+（全精度原值）与来源提示。`report.md` 仍是纯文本交付物，两者不会各说一套——正文措辞
+由 `report.py` 产出后由渲染层复用。
+
+按目标单位的配置：`data.target_unit`（如 `"%"`、`"mg/kg"`）。不填时表头与图内轴标签会写
+「单位未指定」并在页面挂 blocking 徽标——**不会静默省略量纲**。
 
 多目标（`task.target` 给多列）时**按目标拆成独立子 run**，每个子目录都是一套完整产物
 （**兄弟目标列会自动从特征里剔除**——否则会用「蛋白」预测「水分」，分数虚高且审计难以识别）：
@@ -297,7 +325,8 @@ $PY "$ROOT/scripts/predict.py" --run-dir ... --data new.xlsx --out D:/pred/ --no
 | `metrics-and-inference.md` | RPD/RPIQ/CCC 定义、cluster bootstrap、FDR、Y-randomization 统计 |
 | `applicability-domain.md` | T²/Q/kNN/leverage 阈值、AD 有效性检验、新样品判域 |
 | `interpretation.md` | 为什么 SHAP 不能当主图、波段置换怎么做 |
-| `reporting-and-figures.md` | 8 张图的规范、表结构、Methods 15 项清单 |
+| `reporting-and-figures.md` | 8 张图的规范、表结构、Methods 15 项清单、展示规范（精度/单位/徽标/图件检查/HTML） |
+| `standards-mapping.md` | 结果呈现参照了哪些标准、为什么"不声明符合"、TRIPOD+AI 怎么转录 |
 | `reviewer-checklist.md` | 投稿前逐条自查（57 条） |
 | `environment.md` | 版本矩阵、已知 API 差异、换机检查清单 |
 | `troubleshooting.md` | 报错速查 |

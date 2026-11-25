@@ -53,20 +53,39 @@ def run_ad(ctx) -> dict:
                     "flag_rate_majority": float(scores["ad_majority"].mean()),
                     "methods_table": summary.to_dict(orient="records")}
 
-    # 小样本退化判据：与 audit 阶段同一套公式，避免「audit 说没事、ad 才发现」
-    n_groups_ad = int(len(set(np.asarray(ds.groups, dtype=object))))
+    # 小样本退化判据：这里的 n 是**独立样品数**——问的是"够不够撑起一个经验分位阈值"。
+    # 它与逐行打分用的 h*（必须按拟合行数算，因为帽子矩阵建立在行上）不是同一个量。
+    # 两个都给出来，并各带一行口径说明：同一个 run 里出现两个不相等的 h* 而不解释，
+    # 读者只会认为其中一个算错了。
+    diag = dict(getattr(ad, "diag_", {}) or {})
+    n_groups_ad = int(diag.get("n_groups") or len(set(np.asarray(ds.groups, dtype=object))))
+    n_rows_ad = int(diag.get("n_rows") or ad.n_train_)
     p_eff = int(ad.n_comp_)
-    h_star = 3.0 * (p_eff + 1) / max(1, n_groups_ad)
-    reliable = not (n_groups_ad < 5 * (p_eff + 1) or h_star >= 1.0)
+    h_rows = float(diag.get("h_star_rows") or 3.0 * (p_eff + 1) / max(1, n_rows_ad))
+    h_grp = float(diag.get("h_star_groups") or 3.0 * (p_eff + 1) / max(1, n_groups_ad))
+    reliable = not (n_groups_ad < 5 * (p_eff + 1) or h_grp >= 1.0)
     result["ad_reliable"] = bool(reliable)
     result["ad_reliability"] = {
-        "n_groups": n_groups_ad, "n_components": p_eff,
-        "leverage_threshold": float(h_star),
-        "rule": "n >= 5(p+1) 且 h* < 1 才认为经验阈值可靠",
+        "n_groups": n_groups_ad, "n_rows": n_rows_ad, "n_components": p_eff,
+        # 与 ad_scores.csv 的 leverage_thr 同值——这才是真正用来判域外的那条线
+        "leverage_threshold": h_rows,
+        "leverage_threshold_groups": h_grp,
+        "leverage_max": float(diag.get("leverage_max", float("nan"))),
+        "leverage_inert": bool(diag.get("leverage_inert", False)),
+        "leverage_active": bool(diag.get("leverage_active", "leverage" in (ad.active_ or []))),
+        "rule": ("n_groups >= 5(p+1) 且 3(p+1)/n_groups < 1 才认为经验阈值可靠；"
+                 "leverage_threshold 按拟合行数算（逐行打分口径，与 ad_scores.csv 一致），"
+                 "leverage_threshold_groups 只用于本可靠性判断，不参与判域"),
     }
     if not reliable:
-        warn(f"适用域判据退化：n={n_groups_ad}，p={p_eff}，h*={h_star:.3f}。"
-             f"AD 结果只能作探索性描述，不得宣称可外推")
+        warn(f"适用域判据退化：独立样品 n={n_groups_ad}，p={p_eff}，"
+             f"h*(样品口径)={h_grp:.3f}。AD 结果只能作探索性描述，不得宣称可外推")
+    # 只有 leverage 真的在投票集合里，"零触发"才是个值得说的事——
+    # 否则它本来就没参与判定，提一句只会让读者以为它影响过结果。
+    if result["ad_reliability"]["leverage_inert"] and result["ad_reliability"]["leverage_active"]:
+        info(f"杠杆法本次零触发：数据最大杠杆 {diag.get('leverage_max', float('nan')):.4f} "
+             f"≤ 阈值 {h_rows:.4f}（3(k+1)/{n_rows_ad}）。该法仍计入多数票分母，"
+             f"但不会单独判出域外样品")
 
     # 独立样品口径（论文用）：scores 是逐行打分，60 样品 × 3 重复测量 = 180 行，
     # 直接报行数会把域外样品数放大到 3 倍。这里同时给出两套数，下游一律取 group 口径。

@@ -26,6 +26,8 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from . import present
+
 __all__ = [
     "regression_metrics", "classification_metrics", "bootstrap_regression",
     "bootstrap_classification", "aggregate_repeats", "metric_direction",
@@ -40,14 +42,9 @@ __all__ = [
 # 这个案例（比值 4.64）——阈值比它要抓的典型故障还宽，等于没装。
 PRED_RANGE_FACTOR = 2.0
 
-METRIC_LABELS = {
-    "r2": "R²", "rmse": "RMSE", "mae": "MAE", "bias": "Bias(ME)", "rpd": "RPD",
-    "rpiq": "RPIQ", "ccc": "CCC", "slope": "斜率", "intercept": "截距",
-    "auc": "AUROC", "auprc": "AUPRC", "balanced_accuracy": "平衡准确率",
-    "f1_macro": "F1(macro)", "mcc": "MCC", "brier": "Brier", "log_loss": "LogLoss",
-    "sensitivity": "灵敏度", "specificity": "特异度", "accuracy": "准确率",
-    "ece": "ECE",
-}
+# 指标中文名的唯一定义处已迁到 ``present.SPECS``（那里同时管精度、单位、方向）。
+# 这里保留同名符号，是为了不打断 8 处 ``from .metrics import METRIC_LABELS`` 的调用方。
+METRIC_LABELS = dict(present.LABELS_ZH)
 
 # 指标方向：True 表示越大越好
 _DOWN_METRICS = {"rmse", "mae", "brier", "log_loss", "ece", "bias_abs"}
@@ -81,12 +78,19 @@ def metric_direction(name: str) -> bool | None:
     return name not in _DOWN_METRICS
 
 
-def format_metric(name: str, value: Any, digits: int = 4) -> str:
-    if value is None or (isinstance(value, float) and not np.isfinite(value)):
-        return "—"
+def format_metric(name: str, value: Any, digits: int | None = None) -> str:
+    """按字段取展示精度。旧签名保留，行为改由 ``present`` 统一裁决。
+
+    改造前这个函数写在 ``metrics`` 里却零调用，报告各处自己写 ``f"{v:.4f}"``，
+    于是同一个 RMSE 在表里是 3 位小数、正文是 4 位。现在它是 ``present.fmt`` 的薄壳，
+    ``digits`` 只在显式传入时生效，默认跟随字段规格（谁再直接 ``f"{v:.4f}"``
+    就绕过了规格层，自检会扫出来）。
+    """
+    if name in present.SPECS:
+        return present.fmt(name, value, digits=digits)
     if isinstance(value, (int, np.integer)):
         return str(int(value))
-    return f"{float(value):.{digits}f}"
+    return present.fmt_legacy(value, 4 if digits is None else digits)
 
 
 # --------------------------------------------------------------------------- #

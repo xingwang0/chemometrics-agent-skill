@@ -1,0 +1,39 @@
+{
+  "_schema": "sml-standards/1",
+  "_source": {
+    "name": "TRIPOD+AI",
+    "citation": "Collins GS, Moons KGM, Dhiman P, et al. TRIPOD+AI statement: updated guidance for reporting clinical prediction models that use regression or machine learning methods. BMJ 2024;385:e078378.",
+    "doi": "10.1136/bmj-2023-078378",
+    "items_total": 27,
+    "supersedes": "TRIPOD 2015"
+  },
+  "_todo": [
+    "此文件为骨架，items 为空。27 条条目必须由人工对照 BMJ 原文（含补充材料）逐条转录。",
+    "转录前请核对 BMJ 的许可条款与署名要求；不要凭记忆填写条目文本。",
+    "每条至少需要：id、topic_zh、evidence（见 scripts/sml/standards.py 的 EVIDENCE_FILES 与 AUTHOR_ONLY）。",
+    "管线无法提供的条目（仪器型号、抽样代表性、亚组公平性、患者参与、注册号）请用 evidence=[\"fairness\"] 这类 AUTHOR_ONLY 键，状态会显示为「需作者补」。",
+    "本研究不适用临床场景的条目，用 na_reason 写明理由，状态显示为 N/A；不写 na_reason 会按「需补」处理。"
+  ],
+  "evidence_keys": {
+    "audit": "audit/audit.json",
+    "protocol": "cv/cv_summary.json",
+    "models": "cv/models.json",
+    "performance": "cv/metrics_summary.csv",
+    "ci": "cv/metrics_ci.csv",
+    "comparison": "cv/comparison.csv",
+    "oof": "cv/oof_predictions.csv",
+    "figures": "figures/",
+    "perm": "perm/permutation.json",
+    "ad": "ad/ad_eval.json",
+    "interp": "interp/interp.json",
+    "provenance": "provenance.json",
+    "model_card": "model/model_card.json",
+    "instrument": "仅作者可提供",
+    "sampling": "仅作者可提供",
+    "fairness": "仅作者可提供",
+    "ppi": "仅作者可提供",
+    "registration": "仅作者可提供",
+    "ethics": "仅作者可提供"
+  },
+  "items": []
+}

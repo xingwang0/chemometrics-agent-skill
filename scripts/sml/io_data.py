@@ -42,6 +42,10 @@ class Dataset:
     replicate: np.ndarray | None = None
     meta: pd.DataFrame = field(default_factory=pd.DataFrame)
     target_name: str = "y"
+    # 目标变量单位（"%"、"mg/kg"…）。None 表示作者没填——展示层会显式写"单位未指定"，
+    # 不会静默省略；空字符串表示明确无量纲（如 RPD、斜率）。
+    target_unit: str | None = None
+    target_resolution: str | float | None = None
     task: str = "regression"
     classes: list[str] | None = None
     positive_label: Any = None
@@ -88,6 +92,8 @@ class Dataset:
             replicate=None if self.replicate is None else self.replicate[mask],
             meta=self.meta.loc[mask].reset_index(drop=True),
             target_name=self.target_name,
+            target_unit=self.target_unit,
+            target_resolution=self.target_resolution,
             task=self.task,
             classes=self.classes,
             positive_label=self.positive_label,
@@ -101,6 +107,24 @@ class Dataset:
             target_lost=dict(self.target_lost),
             dropped_all_targets=self.dropped_all_targets,
         )
+
+
+def resolve_target_field(cfg: dict, key: str, target: str | None = None):
+    """读取 ``data.<key>``，支持标量或 ``{目标列名: 值}`` 两种写法。
+
+    **字典缺 key 时返回 None，绝不回退到别的目标的单位。** 回退是最省事也最危险的做法：
+    多目标 run 里一个目标以 % 计、另一个以 mg/kg 计，混用会把 RMSE 标错量纲，
+    而且全程不报任何错——读者只会以为这个模型精度高得离谱。
+    """
+    raw = (cfg.get("data") or {}).get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        if target is None:
+            return None
+        val = raw.get(str(target))
+        return None if val is None else val
+    return raw
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +559,9 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
         X=X, y=y, groups=groups.astype(object),
         feature_names=list(feature_cols), row_ids=row_ids,
         batch=batch, replicate=replicate, meta=meta,
-        target_name=target_col, task=task, classes=classes,
+        target_name=target_col, target_unit=resolve_target_field(cfg, "target_unit", target_col),
+        target_resolution=resolve_target_field(cfg, "target_resolution", target_col),
+        task=task, classes=classes,
         positive_label=pos, notes=notes, source_path=str(p), data_hash=data_hash,
         wavelength=wavelength, label_map=dict(label_map), targets=targets_dict,
         target_available=avail, target_lost=lost, dropped_all_targets=n_drop_all,

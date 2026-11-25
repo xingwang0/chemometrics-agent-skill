@@ -41,6 +41,21 @@ METHOD_LABELS = {
 }
 
 
+def _leverage(T: np.ndarray) -> np.ndarray:
+    """帽子矩阵对角线：``h_i = t_iᵀ(TᵀT)⁻¹t_i + 1/n``。
+
+    ``+1/n`` 是截距项对应的那一份，不能省：Williams 的经验警戒线 ``3(k+1)/n`` 正是按
+    「含截距、平均杠杆 (k+1)/n」推出来的。``fit`` 与 ``score`` 必须调同一个函数——
+    曾经 ``fit`` 带 ``+1/n`` 而 ``score`` 不带，等于拿「带截距」的分布估计阈值，
+    再去卡「不带截距」的分数，只在经验分位主导时才会露馅，且方向是系统性偏松。
+    """
+    T = np.asarray(T, dtype=np.float64)
+    if T.size == 0:
+        return np.zeros(0)
+    h = np.einsum("ij,jk,ik->i", T, np.linalg.pinv(T.T @ T), T)
+    return h + 1.0 / T.shape[0]
+
+
 @dataclass
 class ADModel:
     methods: list[str] = field(default_factory=lambda: ["pca_t2", "pca_q", "knn", "leverage"])
@@ -63,6 +78,8 @@ class ADModel:
     # leverage 和一个阈值恒为 0 的 Q 残差会把 AD 结论悄悄带偏。
     degenerate_: dict[str, str] = field(default_factory=dict)
     active_: list[str] = field(default_factory=list)
+    #: 杠杆阈值的口径自述：h* 用行数还是样品数、本数据上杠杆法是否会触发。
+    diag_: dict[str, Any] = field(default_factory=dict)
 
     # ---------------- 拟合 ----------------
     def fit(self, X: np.ndarray, groups: np.ndarray | None = None) -> "ADModel":
@@ -91,7 +108,7 @@ class ADModel:
         knn_dist = dist[:, -1] if dist.shape[1] > 1 else dist[:, 0]
         self.self_knn_ = knn_dist
 
-        lev = np.einsum("ij,jk,ik->i", T, np.linalg.pinv(T.T @ T), T) + 1.0 / n
+        lev = _leverage(T)
         self.self_lev_ = lev
 
         self.thr_ = {
@@ -127,6 +144,32 @@ class ADModel:
             self.active_ = [m for m in self.methods]
         for m, why in deg.items():
             warn(f"AD 方法 {METHOD_LABELS.get(m, m)} 退化，已退出投票：{why}")
+
+        # 「h* 该用哪个 n」必须在数据里讲清楚。逐行打分用的是拟合行数（每个谱图一个点，
+        # 帽子矩阵建立在 n_rows 上），而「独立样品够不够撑起经验阈值」用的是样品数。
+        # 两个数不是同一个量；同一个 run 里同时出现又不加区分，读者只会认为其中一个算错了。
+        n_groups_fit = len(set(map(str, groups))) if groups is not None else n
+        self.diag_ = {
+            "n_rows": int(n),
+            "n_groups": int(n_groups_fit),
+            "n_components": int(k),
+            "h_star_rows": float(3.0 * (k + 1) / max(1, n)),
+            "h_star_groups": float(3.0 * (k + 1) / max(1, n_groups_fit)),
+            "leverage_threshold": float(self.thr_["leverage"]),
+            # 阈值取的是 max(理论界限, 经验分位)，两分支必须都留档：
+            # 只给一个 0.15，读者无法判断它是 3(k+1)/n 还是 95% 分位算出来的。
+            "leverage_q95": float(np.quantile(lev, self.quantile)),
+            "leverage_rule": "h* = max(3(k+1)/n, 训练集经验分位)",
+            "leverage_max": float(np.max(lev)),
+            # 阈值高于数据里最大的杠杆值 ⇒ 这一法本次一次也不会触发。它不属于"退化"
+            # （h* < 1，公式本身没错），但会把 ad_majority 的分母（参与投票的方法数）抬高，
+            # 让"过半"更难达到，所以必须在产物里说清楚，而不是让读者对着 0 越界自己猜。
+            "leverage_inert": bool(float(np.max(lev)) <= float(self.thr_["leverage"])),
+            # 本次是否真的把 leverage 放进投票集合：smoke 预设只跑 T²+kNN，
+            # 这时 ad_scores.csv 里仍有 leverage 列与阈值，但它不参与判域，
+            # 图与报告必须说清楚，否则读者会以为那条红线决定了域外样品。
+            "leverage_active": bool("leverage" in self.active_),
+        }
         return self
 
     # ---------------- 打分 ----------------
@@ -142,7 +185,7 @@ class ADModel:
         k = int(min(max(self.knn_k, 1), self.n_train_ - 1)) if self.n_train_ > 1 else 1
         dist, _ = self.nn.kneighbors(T, n_neighbors=min(k, self.nn.n_samples_fit_))
         knn_dist = dist[:, -1]
-        lev = np.einsum("ij,jk,ik->i", T, np.linalg.pinv(T.T @ T), T)
+        lev = _leverage(T)
 
         flags = {
             "pca_t2": t2 > self.thr_["pca_t2"],
@@ -181,6 +224,7 @@ class ADModel:
             "thresholds": self.thr_,
             "quantile": self.quantile,
             "n_train": int(self.n_train_),
+            "diagnostics": dict(self.diag_),
             "note": ("阈值取训练集经验分位（小样本下 F/χ² 近似偏乐观），另存 F 理论值 thr_f_=%s；"
                      "退化方法（阈值不可能被越过）已退出投票，见 degenerate_methods") % (
                 f"{self.thr_f_:.3f}" if hasattr(self, "thr_f_") else "n/a"),

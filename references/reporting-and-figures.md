@@ -12,11 +12,11 @@
 | F1 | `F1_pred_vs_obs` | OOF 预测-实测散点 + 1:1 线 + R²/RMSE/RPD/斜率 注记（分类：ROC 曲线） | 主图 |
 | F2 | `F2_residual` | 残差 vs 实测 + ±1.96SD 带 + 偏差 | 主图或补充 |
 | F3 | `F3_cv_distribution` | 各模型 R²（或 AUC）在全部折上的箱线 + 散点 | 主图（证明稳定性） |
-| F4 | `F4_williams` | Williams plot：leverage vs 学生化残差，h* 竖线、±3 横线 | 主图（适用域） |
+| F4 | `F4_williams` | Williams plot：leverage vs 标准化残差，h* 竖线、±3 横线。**纵轴未按 `√(1−h)` 校正**，图内已注明"仅作诊断" | 主图（适用域） |
 | F5 | `F5_calibration` | 回归→Bland-Altman；分类→校准曲线（Wilson CI） | 主图（校准）；`proba_kind≠native` 时**跳过**并 warn |
 | F6 | `F6_y_randomization` | 置换零分布直方图 + 观测值红线 + p 值 | 主图（抗噪声） |
 | F7 | `F7_importance_map` | 波段置换重要性柱状 + 平均谱底图（共享波数轴） | 主图（可解释） |
-| F8 | `F8_model_comparison` | 各模型主指标点估计 ±sd + 95% CI | 主图或补充 |
+| F8 | `F8_model_comparison` | 各模型主指标点估计 ±sd + 95% CI；`metric_basis=pooled` 的行标 `†` | 主图或补充 |
 
 产物目录：`<run>/figures/`。缺对应上游产物时该图自动跳过，并在日志里列出编号。
 
@@ -157,3 +157,71 @@ AD 相关数字另有一套口径：**只报独立样品数**（见 `applicabili
 | 图太密 | 缩到单栏后看不清 | 单图单栏宽 3.4–4.8 in，不要塞满 |
 | 用颜色区分 8 个模型 | 无法辨色 | 超过 5 类改用直接标注 + 分面 |
 | 保存时 `bbox_inches` 未设 | 标签被裁 | 本包统一 `bbox_inches="tight"` |
+
+---
+
+## 展示规范（1.2.0 起，代码强制）
+
+以上是"应该怎么做"，下面这些是"做不到就会失败"的部分。全部由 `sml/present.py` 的
+字段规格驱动，Markdown、HTML、xlsx 显示格式与图内注记共用同一份定义。
+
+### 精度
+
+| 类别 | 字段 | 规则 |
+|---|---|---|
+| 有界无量纲 | R²、AUROC、AUPRC、平衡准确率、F1、MCC、CCC、灵敏度、特异度、准确率 | 3 位小数 |
+| 可用性指数 | RPD、RPIQ | 2 位小数 |
+| 有量纲误差量 | RMSE、MAE、bias、截距、Δ、阈值 | **4 位有效数字**（不是 4 位小数） |
+| 计数 / 排名 | n、独立样品数、有效折数、rank | 整数，不带千分位（`1,024` 会被读成 1.024） |
+| p 值 | p、p_BH、p_Bonf | `p<0.001` / `p>0.999` 用不等号，其余 3 位小数 |
+| 比例 | 域外比例、失败折比例 | 百分数 + 1 位小数；CSV 里仍存 0–1 |
+
+三条硬规则：
+
+1. **零值只写 `0`**：`-0.0` 归一为 `0`，所以 `-0.000`、`0.0000` 结构上不会出现。
+2. **禁止二次舍入**：`fmt_detail` 收到已格式化的 `Formatted` 直接 `TypeError`；
+   差值必须由原始值算（`fmt_delta(a_raw, b_raw)`）。
+3. **CSV / XLSX 存全精度**：只有"人看的字符串"和 xlsx 的 `num_format` 会舍入。
+   不要在 `build_tables` 里 `df.round(3)`——那会断掉"所有数字可从
+   `cv/oof_predictions.csv` 重算"的承诺，并让 `rebuild_tables.py` 在舍入值上重算 sd。
+
+### 单位
+
+- 目标单位来自 `data.target_unit`。缺失时**三处同时显式告警**：表头/轴标签写
+  「单位未指定」、页面挂 blocking 徽标、`compliance.json` 记录一条。
+- 三种载体写法互斥：Markdown 用 `cm^-1`、HTML 用 `cm<sup>−1</sup>`、
+  matplotlib 用 `cm$^{-1}$`。混用就是"图内方块、网页正常"的成因，`unit_suffix` 会断言拦住。
+
+### 状态徽标
+
+`†` 池化口径 · `‡` 含退化折 · `⊘` 适用域无效 · `○` 域外样品 · `⇱` 预测值越界 ·
+`≈` 概率非原生 · `=` 差异不显著 · `¹` 单次重复 · `–` 无 CI · `?` 单位未指定 ·
+`×` 模型失败 · `!` 满分指标 · `b` 缺基线。图例全量渲染（"某条没出现"本身是信息）。
+
+### 措辞守卫
+
+扫描"证明 / 完全准确 / 无 p 值的显著优于 / 可外推 / 无系统偏差 / 归因于"等表述。
+命中 error 级 → 写 `report/compliance.json` + 页面红色横幅；`report.strict_text=true`
+时才抛异常。**否定句里的告诫不算违规**（"不得宣称模型可安全外推"是正确的，不能判成越界）。
+
+### 图件完整性（`figures/figure_qc.json`）
+
+| 检查 | 判据 |
+|---|---|
+| Q1 双 y 轴 | 两个坐标轴位置完全重合（twinx/twiny）→ 违规 |
+| Q2 截断纵轴 | 柱状图的 y 下界 > 0 且数据下界更低，且未声明 `_sml_zero_declared` → 违规 |
+| Q3 色标 | `jet / rainbow / gist_rainbow / gist_ncar / hsv` → 违规 |
+| Q4 箱线图 | 有箱体但该轴无散点 → 违规 |
+| Q5 轴标签 / 误差线 | 数值轴无标签；或 F8 无 ErrorbarContainer → 违规 |
+
+`selfcheck.py` 在 smoke run 上断言该文件为空。注意 Q2 只针对柱状图：箱线图与散点图
+按数据自动缩放是正常做法，不在此列。
+
+### HTML 报告（`report/report.html`）
+
+- 单文件、内联 CSS、**零外链零 JS**：断网、离线、审稿系统里都能原样打开。
+- 图引用 `../figures/*.png` 原图，不重采样、不 base64——页面图与投稿图必须是同一字节。
+- 每个数字带 `data-raw`（全精度原值）与悬停提示（来源文件 + 字段）；要复算请回 CSV。
+- 三档断点：≥1100px 双栏（目录 + 正文）、760–1100px 单栏 + 表格横向滚动 + 首列吸附、
+  <760px 隐藏目录。`@media print` 按 A4 排版，表头每页重复，图表不跨页断开。
+- 表 T2 的 `†` 与 `metric_basis` 必须与性能一起读；页面在表注里直接写明，不靠读者自己发现。

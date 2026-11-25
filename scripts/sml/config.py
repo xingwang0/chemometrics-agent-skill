@@ -56,6 +56,11 @@ DEFAULTS: dict[str, Any] = {
         "drop_cols": [],
         "long_cols": {"id": None, "x": None, "y": None},
         "wavelength_axis": None,       # {start, stop, step, unit} 仅用于画图与峰映射
+        # 目标的物理单位（"%"、"mg/kg"、"mV"…）。不填时报告与图上会显式写"单位未指定"，
+        # 而不是静默省掉——没有量纲的 RMSE 读者无法判断模型能不能用。
+        # 支持 {目标列名: 单位} 的字典写法；多目标时缺 key 即视为未指定，不回退到别的目标。
+        "target_unit": None,
+        "target_resolution": None,     # 目标的测量分辨率（同单位），用于说明 RMSE 是否低于分辨率
         "na_values": ["", "NA", "N/A", "nan", "NaN", "null", "-", "--"],
         "min_valid_frac": 0.5,         # 特征列非缺失比例低于此值 -> 丢弃
     },
@@ -113,6 +118,9 @@ DEFAULTS: dict[str, Any] = {
         "formats": ["png", "pdf"],
         "title": None,
         "authors": None,
+        "html": True,                  # 额外产出 report/report.html（单文件、零外链）
+        "precision_profile": "paper",  # paper（期刊，默认）| compact（投屏/网页更紧凑）
+        "strict_text": False,          # True 时措辞守卫命中 error 直接抛异常
     },
     "runtime": {
         "n_jobs": -1,
@@ -477,6 +485,26 @@ def validate_config(cfg: dict) -> list[str]:
         raise ConfigError("E-CFG-017", "strategy 需要批次信息，但 data.batch_col 未设置")
     if strategy == "holdout_batch" and not cfg["split"]["holdout_batch"]:
         raise ConfigError("E-CFG-018", "strategy=holdout_batch 时必须指定 split.holdout_batch")
+
+    # 目标单位：给了就必须是字符串或 {目标列名: 单位}。留空是合法的降级（报告会显式写
+    # 「单位未指定」），但写错类型会一路传到图和表里变成 "1234" 这种没有量纲的数字。
+    unit = cfg["data"].get("target_unit")
+    if unit is not None and not isinstance(unit, (str, dict)):
+        raise ConfigError(
+            "E-CFG-043",
+            f"data.target_unit 必须是字符串（如 \"mg/kg\"、\"%\"）或 {{目标列名: 单位}} 字典，"
+            f"收到 {type(unit).__name__}：{unit!r}")
+    if isinstance(unit, dict):
+        given = {str(k) for k in unit}
+        missing = [str(t) for t in targets if str(t) not in given]
+        if missing:
+            warnings.append(
+                f"E-CFG-043 data.target_unit 缺少以下目标的单位：{missing}。"
+                f"报告中它们会显示「单位未指定」，不会借用其它目标的单位")
+    profile = str(cfg["report"].get("precision_profile", "paper"))
+    if profile not in ("paper", "compact"):
+        raise ConfigError(
+            "E-CFG-044", f"report.precision_profile 只能是 paper / compact，收到 {profile!r}")
 
     # holdout_random 只产出一次随机划分（GroupShuffleSplit n_splits=1）。若 repeats>1，
     # 旧行为是"跑 N 个不同划分、把 N 个测试集的行混在一起算池化 OOF 指标"，于是：

@@ -50,7 +50,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 
 装好后**新开一个会话**——skill 列表在会话启动时加载，当前会话看不到。
 
-需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（34 项）确认环境。
+需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（53 项）确认环境。
 
 **方式二：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
 
@@ -59,7 +59,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 ```bash
 # 在仓库根目录执行（agent 内部也是这么调的）
 
-# 1) 先验环境：34 项自检（换机必跑）
+# 1) 先验环境：53 项自检（换机必跑）
 python scripts/selfcheck.py
 
 # 2) 再跑通：30 秒冒烟，用合成数据走完全流程
@@ -120,10 +120,18 @@ runs/<id>/
 ├── perm/permutation.json
 ├── ad/     ad_eval.json · ad_model.joblib
 ├── model/  final_model.joblib · model_card.json
-├── figures/ F1..F8  png(300dpi) + pdf(矢量)
+├── figures/ F1..F8  png(300dpi) + pdf(矢量)  + figure_qc.json（图件完整性检查）
 ├── tables/  T1..T6  csv + xlsx
-└── report/  report.md · methods_zh.md · methods_en.md · reviewer_checklist.md
+└── report/  report.html（单文件响应式）· report.md · methods_zh.md · methods_en.md ·
+            reviewer_checklist.md · compliance.json
 ```
+
+`report.html` 是新增的主交付物：CSS 全内联、零外链零 JS，断网与审稿系统里都能原样打开；
+三档响应式断点 + A4 打印样式；图引用 `../figures/*.png` 原图（不重采样）；每个数字带
+`data-raw` 全精度原值，悬停可看来源文件——**页面上看到的是舍入后的，CSV 里存的仍是原始 float**。
+
+要带单位的 RMSE 请在配置里写 `data.target_unit`（如 `"%"`、`"mg/kg"`）。不填时表头与图内轴
+标签会明确写「单位未指定」并挂红色徽标，不会静默省掉量纲。
 
 多目标自动按目标拆成独立子 run，**兄弟目标列会从特征里剔除**——否则会用「蛋白」预测「水分」，分数虚高且审计难以识别。
 
@@ -157,4 +165,4 @@ Apache License 2.0，见 `LICENSE` 与 `NOTICE`。允许商用与修改，须保
 
 本项目**未针对**监管申报（ICH / USP / CLSI / GB）、临床诊断、生产实时控制等场景做过验证，不要把管线输出直接当作上述用途的判定依据。**作者不对据此作出的科研结论、生产决策、监管申报或商业交付承担任何责任。** 上述免责受适用法律约束；中国法下依法不得排除的责任（故意或重大过失致财产损失）不因本声明而免除。
 
-引用时请注明版本号（对应 GitHub Release，如 `v1.1.1`）与对应 run 目录下 `provenance.json` 的三哈希。机器可读的引用信息见 `CITATION.cff`。
+引用时请注明版本号（对应 GitHub Release，如 `v1.2.1`）与对应 run 目录下 `provenance.json` 的三哈希。机器可读的引用信息见 `CITATION.cff`。

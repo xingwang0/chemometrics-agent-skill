@@ -1,6 +1,6 @@
 {
-  "_comment": "色盲友好配色（Okabe-Ito 变体），与 sml/plots.py 的 PALETTE 保持一致",
-  "colors": ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#666666"],
+  "_comment": "色盲友好配色（Okabe-Ito 变体）。plots.PALETTE 由此文件读取；这里必须与代码里的兜底值一致，否则第 9、10 个模型会静默换色",
+  "colors": ["#0072B2", "#E69F00", "#009E73", "#CC79A7", "#56B4E9", "#D55E00", "#F0E442", "#666666", "#44AA99", "#AA4499"],
   "semantic": {
     "model": "#0072B2",
     "baseline_pls": "#666666",

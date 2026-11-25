@@ -505,7 +505,8 @@ def main(argv: list[str] | None = None) -> int:
     print()
     info(f"全部完成：执行 {len(ran)} 个 stage，跳过 {len(skipped)} 个，总耗时 {human_duration(total)}")
     info(f"产物目录：{run_dir}")
-    for rel, label in (("audit/audit.md", "数据审计"), ("report/report.md", "主报告"),
+    for rel, label in (("audit/audit.md", "数据审计"), ("report/report.html", "HTML 报告"),
+                       ("report/report.md", "主报告"),
                        ("report/methods_zh.md", "Methods 草稿"), ("report/reviewer_checklist.md", "审稿清单"),
                        ("cv/metrics_summary.csv", "性能汇总"), ("figures", "图表")):
         p = run_dir / rel

@@ -95,6 +95,8 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `exclude_from_features` | `[]` | 额外剔除的列。**多目标 fan-out 时由 `run_pipeline` 自动填入全部目标列**（子 run 的 `task.target` 只剩一个，若不带这项，兄弟目标会留在特征里） |
 | `long_cols` | `{id,x,y}` | 长表三列的列名 |
 | `wavelength_axis` | null | `{start, stop, step, unit}`；列名不是数值时才需要 |
+| `target_unit` | null | 目标变量的物理单位，如 `"%"`、`"mg/kg"`、`"mV"`；也接受 `{"protein": "%", "moisture": "g/100g"}`。**不填时报告与图上会显式写「单位未指定」**，不会静默省略——没有量纲的 RMSE 读者无法判断能否使用。字典写法缺某个目标时报 `E-CFG-043` 警告，且**不会借用别的目标的单位** |
+| `target_resolution` | null | 目标的测量分辨率（同单位）。用于说明 RMSE 是否已低于分辨率——低于分辨率时，模型再好也测不出差异 |
 | `na_values` | `["", "NA", "N/A", ...]` | 视为缺失的取值 |
 | `min_valid_frac` | `0.5` | 列非缺失比例低于此值则整列丢弃 |
 
@@ -260,6 +262,9 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `formats` | `["png","pdf"]` | 输出格式 |
 | `title` | null | 报告副标题 |
 | `authors` | null | 预留 |
+| `html` | `true` | 额外产出 `report/report.html`（单文件、内联 CSS、零外链零 JS、响应式 + A4 打印样式）。图引用 `../figures/*.png` 原图，不重采样 |
+| `precision_profile` | `paper` | `paper`（期刊口径）或 `compact`（投屏/网页更紧凑）；取值非法报 `E-CFG-044`。精度本身由 `sml/present.py` 的字段规格裁决，此项只影响版式间距 |
+| `strict_text` | `false` | `true` 时措辞守卫命中 error 直接抛异常。默认只写 `report/compliance.json` 并在页面挂红色横幅——报告阶段抛错会让数值正确的 run 因一句模板措辞整阶段失败 |
 
 ---
 
@@ -311,6 +316,8 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `E-PRED-002` | 新样品表缺训练特征（会列出前 10 个缺失列名） |
 | `E-PRED-003` | `predict.py` 既没给 `--data` 也没给 `--retrain` |
 | `E-PRED-004` | run 目录下没有 `config.resolved.json`，无法重建最终模型 |
+| `E-CFG-043` | `data.target_unit` 类型错（须字符串或 `{目标: 单位}`），或字典里缺某些目标的单位 |
+| `E-CFG-044` | `report.precision_profile` 取值不是 `paper` / `compact` |
 
 ---
 

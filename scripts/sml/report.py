@@ -22,8 +22,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from . import present
 from .calib import regression_calibration
-from .metrics import METRIC_LABELS, format_metric
+from .metrics import METRIC_LABELS
 from .plots import FIGURE_INDEX
 from .selection import pick_best_model, significance_vs_runner_up
 from .utils import as_path, ensure_dir, info, read_json, warn, write_text
@@ -75,15 +76,12 @@ def _read_csv_if(run: Path, rel: str) -> pd.DataFrame:
 
 
 def _fmt(v: Any, digits: int = 4) -> str:
-    if v is None:
-        return "—"
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    if not np.isfinite(f):
-        return "—"
-    return f"{f:.{digits}f}"
+    """全项目唯一的"数值 → 字符串"入口，实体在 ``present.fmt_legacy``。
+
+    保留这个薄壳是为了让接入规格层这一步可以**输出零变化**：先换实现、确认
+    report.md 与 tables/*.csv 逐字节不变，再逐处换成带字段语义的 ``present.fmt``。
+    """
+    return present.fmt_legacy(v, digits)
 
 
 # --------------------------------------------------------------------------- #
@@ -183,17 +181,19 @@ def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
                 "模型": model,
                 "域内样品": ev.get("n_inside_groups", ev.get("n_inside")),
                 "域外样品": ev.get("n_outside_groups", ev.get("n_outside")),
-                "域外样品比例": _fmt(ev.get("flag_rate_groups", ev.get("flag_rate")), 3),
+                # 比例一律显示为百分数：旧实现在 T5 里写 0.033、在正文里写 3.3%，
+                # 同一个数在同一份报告里有两种形态，转述时必错。
+                "域外样品比例": present.fmt_ratio(ev.get("flag_rate_groups", ev.get("flag_rate"))),
                 "域外样品(多数测量)": ev.get("n_outside_groups_majority"),
                 "域内OOF行": ev.get("n_inside"), "域外OOF行": ev.get("n_outside"),
             }
             if clf:
-                row["域内准确率"] = _fmt(ev.get("acc_inside"), 3)
-                row["域外准确率"] = _fmt(ev.get("acc_outside"), 3)
+                row["域内准确率"] = present.fmt("accuracy", ev.get("acc_inside"))
+                row["域外准确率"] = present.fmt("accuracy", ev.get("acc_outside"))
             else:
-                row["域内RMSE"] = _fmt((ev.get("metrics_inside") or {}).get("rmse"), 4)
-                row["域外RMSE"] = _fmt((ev.get("metrics_outside") or {}).get("rmse"), 4)
-            row["有效性检验 p"] = _fmt(ev.get("mannwhitney_p", ev.get("fisher_p")), 4)
+                row["域内RMSE"] = present.fmt("rmse", (ev.get("metrics_inside") or {}).get("rmse"))
+                row["域外RMSE"] = present.fmt("rmse", (ev.get("metrics_outside") or {}).get("rmse"))
+            row["有效性检验 p"] = present.fmt_p(ev.get("mannwhitney_p", ev.get("fisher_p")))
             row["AD 是否有效"] = {True: "是", False: "否", None: "无法判定"}.get(
                 ev.get("ad_effective"), "—")
             rows.append(row)
@@ -219,13 +219,15 @@ def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
     for name, df in tables.items():
         df.to_csv(out / f"{name}.csv", index=False, encoding="utf-8")
 
-    # 单文件 xlsx（多 sheet），便于直接塞进补充材料
+    # 单文件 xlsx（多 sheet），便于直接塞进补充材料。
+    # 只设 num_format（显示层），单元格里存的仍是未舍入的原始 float——
+    # 有人要拿它做二次统计时，拿到的不能是被四舍五入过的数。
     if tables:
         try:
             xlsx = out / "tables.xlsx"
             with pd.ExcelWriter(xlsx, engine="xlsxwriter") as writer:
                 for name, df in tables.items():
-                    df.to_excel(writer, sheet_name=name[:31], index=False)
+                    present.xlsx_sheet(writer, name, df)
             info(f"表格已写出：{len(tables)} 张 CSV + 1 个 xlsx")
         except Exception as exc:  # noqa: BLE001
             warn(f"xlsx 写出失败（CSV 仍然可用）：{type(exc).__name__}: {exc}")
@@ -373,10 +375,11 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
         rate_g = first.get("flag_rate_groups")
         # 单位必须写死在句子里：只有 group 口径能进论文，行口径只作备查
         if n_out_g is not None and n_g:
-            unit = (f"共有 {n_out_g} 个独立样品（占 {n_g} 个样品的 {float(rate_g):.1%}）"
+            unit = (f"共有 {n_out_g} 个独立样品（占 {n_g} 个样品的 "
+                    f"{present.fmt_ratio(rate_g)}）"
                     f"至少有 1 次测量被判定为域外")
             unit_en = (f"in total {n_out_g} of {n_g} independent samples "
-                       f"({float(rate_g):.1%}) had at least one measurement outside the domain")
+                       f"({present.fmt_ratio(rate_g)}) had at least one measurement outside the domain")
         else:
             unit = "域外样品数未能按独立样品汇总（缺少 sample_id 分组信息）"
             unit_en = "the number of out-of-domain samples could not be aggregated by specimen"
@@ -392,13 +395,20 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
         deg_txt_en = ("; " + " and ".join(_AD_LABELS.get(k, k) for k in degs)
                       + " were degenerate on this dataset (their thresholds cannot be exceeded) "
                       "and were excluded from voting") if degs else ""
-        ad_text = (f"以 {len(acts)} 种方法联合判定适用域（{act_txt}；阈值取训练集 {quant}% 经验分位，"
+        # 阈值口径要按方法分开写：leverage 是 max(3(k+1)/n, 分位)，其余是纯经验分位。
+        # 一句"阈值取 95% 经验分位"会把 leverage 的算法说错，而这句话会被原样抄进论文。
+        lev_note_zh = ("；leverage 取 max(3(k+1)/n, 同分位)，其中 n 为拟合行数"
+                       if "leverage" in acts else "")
+        lev_note_en = ("; leverage used max(3(k+1)/n, the same percentile) with n = number of "
+                       "fitted spectra" if "leverage" in acts else "")
+        ad_text = (f"以 {len(acts)} 种方法联合判定适用域（{act_txt}；阈值取训练集 {quant}% 经验分位"
+                   f"{lev_note_zh}，"
                    f"任一方法越界即判为域外{deg_txt_zh}），{unit}。"
                    f"{first.get('conclusion', '')}")
         ad_text_en = (f"The applicability domain was defined jointly by {len(acts)} method(s) "
                       f"({act_txt.replace('、', ', ')}) with thresholds taken as the {quant}th percentile "
-                      f"of the training data (a specimen was flagged if any single method exceeded its "
-                      f"threshold{deg_txt_en}); {unit_en}. "
+                      f"of the training data{lev_note_en} (a specimen was flagged if any single method "
+                      f"exceeded its threshold{deg_txt_en}); {unit_en}. "
                       f"Repeated measurements of the same specimen were not counted separately. "
                       f"{ad_conclusion_en(first.get('ad_effective'), ds.task)}")
 
@@ -699,7 +709,8 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
         tier = ("RPD>3：可用于定量筛查" if rpd > 3 else
                 "2<RPD<3：可用于粗略定量" if rpd > 2 else
                 "RPD<2：仅能做定性/半定量判断")
-        lines.append(f"**RPD 解读**：本次 RPD={rpd:.2f}，{tier}（Williams 的常用分档）。")
+        lines.append(f"**RPD 解读**：本次 RPD={present.fmt('rpd', rpd)}，{tier}"
+                     f"（常用经验分档，口径见 references/metrics-and-inference.md）。")
     p = write_text(out_dir / "reviewer_checklist.md", "\n".join(lines))
     return p
 
@@ -791,6 +802,10 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                        "不外推；AUC/AP 不受影响（单调变换保持排序）。")
     if not criticals and not warns_:
         lim.append("数据审计未发现目标泄漏与严重共线问题。")
+    # 把"最优模型"那句话与局限清单挂到 block 上，供 report_html 直接复用。
+    # 复制一份逻辑到渲染层是这类项目最常见的腐化方式：两边各自演化半年后，
+    # Markdown 说"性能相当"、HTML 说"显著优于"，而没人知道哪个是当前真相。
+    block["_limitations"] = list(lim)
 
     lines: list[str] = []
     lines.append(f"# 预测建模报告：{ds.target_name}")
@@ -817,7 +832,9 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     if block.get("task") == "regression":
         prep_note = (summary.iloc[0].get("prep_mix") if not summary.empty and "prep_mix" in summary
                      else "—")
-        lines.append(_best_model_line(block, best_model))
+        best_line = _best_model_line(block, best_model)
+        block["_best_line"] = best_line
+        lines.append(best_line)
         lines.append(f"- 逐折选中的预处理：{prep_note}")
         if block.get("basis") == "pooled":
             n_ok = int(block.get("n_folds_ok") or 0)
@@ -842,7 +859,9 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
         if cal:
             lines.append(f"- 校准：{cal.get('interpretation', '')}")
     else:
-        lines.append(_best_model_line(block, best_model))
+        best_line = _best_model_line(block, best_model)
+        block["_best_line"] = best_line
+        lines.append(best_line)
         lines.append(f"- 交叉验证性能：AUROC = {_fmt(block.get('auc'), 3)}，"
                      f"平衡准确率 = {_fmt(block.get('balanced_accuracy'), 3)}，"
                      f"F1(macro) = {_fmt(block.get('f1_macro'), 3)}，MCC = {_fmt(block.get('mcc'), 3)}")
@@ -862,7 +881,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     if ad_eval and ad_eval.get("conclusion"):
         _n_out, _n_g = ad_eval.get("n_outside_groups_any"), ad_eval.get("n_groups")
         _rate = ad_eval.get("flag_rate_any_groups")
-        _head = (f"{_n_out}/{_n_g} 个独立样品被判为域外（{float(_rate):.1%}）；"
+        _head = (f"{_n_out}/{_n_g} 个独立样品被判为域外（{present.fmt_ratio(_rate)}）；"
                  if _n_out is not None and _n_g and _rate is not None else "")
         lines.append(f"- 适用域：{_head}{ad_eval['conclusion']}")
     lines.append("")
@@ -882,7 +901,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     lines.append(f"| 批次 | {len(pd.unique(ds.batch)) if ds.batch is not None else '未提供'} |")
     lines.append(f"| 任务 | {ds.task}（目标 `{ds.target_name}`）|")
     cond = s.get("cond_number")
-    cond_txt = f"{float(cond):.2e}" if isinstance(cond, (int, float)) and np.isfinite(cond) else str(cond or "—")
+    cond_txt = present.fmt("cond_number", cond) if isinstance(cond, (int, float)) else str(cond or "—")
     lines.append(f"| 条件数 | {cond_txt} |")
     lines.append(f"| 有效秩 | {s.get('effective_rank', '—')} |")
     lines.append("")
@@ -1026,7 +1045,8 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
         n_g = ad_eval.get("n_groups")
         rate = ad_eval.get("flag_rate_any_groups")
         if n_flag is not None and n_g:
-            lines.append(f"- 域外样品（独立样品口径）：**{n_flag} / {n_g}**（{float(rate):.1%}）；"
+            lines.append(f"- 域外样品（独立样品口径）：**{n_flag} / {n_g}**"
+                         f"（{present.fmt_ratio(rate)}）；"
                          f"{ad_eval.get('group_rule', '样品内任一测量越界即计为域外')}")
         lines.append(f"- OOF 行口径（备查，勿用于论文）：{_fmt(ad_eval.get('flag_rate_any'), 3)}"
                      f"（同一样品的重复测量与重复次数会重复计数）")
@@ -1154,9 +1174,41 @@ def run_report(ctx) -> dict:
     methods = build_methods(ctx, best_model, block, perm, ad_eval, out_dir)
     checklist = build_reviewer_checklist(ctx, block, perm, ad_eval, comp, tables, out_dir)
 
+    # 展示层：HTML 报告、措辞合规记录、报告清单对照。
+    # 全部包在 try 里——report.md 已经落盘，附加产物失败不该让整份报告作废。
+    html_path = None
+    compliance_path = None
+    tripod_path = None
+    try:
+        if bool(cfg.get("report", {}).get("html", True)):
+            from .report_html import build_html
+            html_path = build_html(ctx, best_model, tables, block, perm=perm,
+                                   ad_eval=ad_eval, figures=figures, out_dir=out_dir)
+        prose = "\n".join([str(block.get("_best_line") or "")]
+                          + [str(x) for x in (block.get("_limitations") or [])])
+        findings = present.guard_text(
+            prose, present.evidence_for(block, ds, perm, ad_eval),
+            strict=bool(cfg.get("report", {}).get("strict_text", False)))
+        from .utils import write_json
+        compliance_path = write_json(out_dir / "compliance.json", {
+            "n_error": sum(1 for f in findings if f.level == "error"),
+            "n_warn": sum(1 for f in findings if f.level == "warn"),
+            "findings": [{"rule": f.rule, "level": f.level,
+                          "snippet": f.snippet, "advice": f.advice} for f in findings],
+        })
+        if findings:
+            warn(f"措辞检查：{len(findings)} 条数据不支持的强断言，详见 compliance.json")
+        from .standards import write_checklist
+        tripod_path = write_checklist(ctx, out_dir)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"展示层附加产物失败（report.md 不受影响）：{type(exc).__name__}: {exc}")
+
     result = {
         "best_model": best_model,
         "report": str(report_path),
+        "html": None if html_path is None else str(html_path),
+        "compliance": None if compliance_path is None else str(compliance_path),
+        "tripod_ai": None if tripod_path is None else str(tripod_path),
         "methods": methods,
         "checklist": str(checklist),
         "n_figures": len(figures),
@@ -1167,5 +1219,6 @@ def run_report(ctx) -> dict:
     from .utils import write_json
 
     write_json(out_dir / "report_index.json", result)
-    info(f"报告完成：{report_path.name}，图 {len(figures)} 张，表 {len(tables)} 张")
+    info(f"报告完成：{report_path.name}，图 {len(figures)} 张，表 {len(tables)} 张"
+         + (f"；HTML 报告 {Path(result['html']).name}" if result.get("html") else ""))
     return result
