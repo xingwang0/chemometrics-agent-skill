@@ -86,9 +86,10 @@ def rebuild(run_dir: Path, n_boot: int | None, alpha: float | None) -> dict:
         # 口径判定必须和 stage_cv 用同一份实现：重算表同样会碰上「有效折不足」的
         # 留一法/小样本场景。少了这一步，rebuild 会静默退回折均值口径，还不报警。
         summary = mark_metric_basis(summary, ok, group_keys=tuple(model_keys))
-        pooled_msg = describe_pooled_rows(summary)
+        strategy = (cfg.get("split") or {}).get("strategy")
+        pooled_msg = describe_pooled_rows(summary, strategy=strategy)
         if pooled_msg:
-            warn(pooled_msg)
+            (info if strategy == "holdout_random" else warn)(pooled_msg)
         summary = rank_models(summary, task)
         summary.to_csv(cv_dir / "metrics_summary.csv", index=False, encoding="utf-8")
         info(f"metrics_summary.csv 重算完成（{len(summary)} 行，按 {'+'.join(model_keys)} 聚合）")

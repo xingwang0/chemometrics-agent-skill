@@ -249,9 +249,11 @@ def run_cv(ctx) -> dict:
         # 判定逻辑统一在 sml.metrics.mark_metric_basis —— rebuild_tables 走的是同一份实现，
         # 否则「只重算表不重训」会把池化口径又丢回折均值，而且不报警。
         summary = mark_metric_basis(summary, ok_folds, group_keys=tuple(model_keys))
-        pooled_msg = describe_pooled_rows(summary)
+        strategy = cfg["split"]["strategy"]
+        pooled_msg = describe_pooled_rows(summary, strategy=strategy)
         if pooled_msg:
-            warn(pooled_msg)
+            # holdout_random 只有一个外层折，池化本来就是正确口径：说清楚，别当异常报
+            (info if strategy == "holdout_random" else warn)(pooled_msg)
         summary = rank_models(summary, ds.task)
         if ds.task == "regression" and {"r2_mean", "r2"} <= set(summary.columns):
             groups = (summary.groupby("target", dropna=False)

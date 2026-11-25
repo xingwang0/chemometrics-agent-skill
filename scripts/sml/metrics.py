@@ -617,13 +617,21 @@ def mark_metric_basis(
     return df
 
 
-def describe_pooled_rows(summary: pd.DataFrame) -> str | None:
-    """把「折均值不可用」的行写成一句可直接 warn 的话；没有这类行时返回 None。"""
+def describe_pooled_rows(summary: pd.DataFrame, strategy: str | None = None) -> str | None:
+    """把「折均值不可用」的行写成一句可直接 warn 的话；没有这类行时返回 None。
+
+    ``strategy="holdout_random"`` 时换成中性说法：这种划分本来就只产 1 个外层折，
+    折均值不可用是**设计如此**，池化 OOF 就是正确口径。照搬「有效折不足」的警告
+    会让人以为哪里出了错，而实际上什么都没错。
+    """
     if summary is None or summary.empty or "metric_basis" not in summary.columns:
         return None
     thin = summary[summary["metric_basis"].astype(str).eq("pooled")]
     if thin.empty:
         return None
+    if strategy == "holdout_random":
+        return ("单次留出划分（holdout_random）：每个模型只有 1 个外层折，折均值不可用属预期，"
+                "指标按池化 OOF（即测试集）引用——这不是错误，也不要用 repeats 去凑多折。")
     parts = []
     for _, r in thin.head(6).iterrows():
         ok, deg = r.get("n_folds_ok"), r.get("n_folds_degenerate")
