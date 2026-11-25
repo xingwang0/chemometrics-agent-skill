@@ -637,7 +637,7 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
           "请改用置换重要性/SHAP")
          if vip_info and vip_info.get("reliable") is False else "✓"),
         ("预测值有没有跑出目标量纲？",
-         "逐折比对预测值与训练集目标极差：越界超过 5 倍即判为外推爆炸并报警",
+         "逐折比对预测值与训练集目标极差：越界超过 2 倍即判为外推爆炸并报警",
          "cv/fold_results.csv（pred_range_ratio / pred_n_extreme）", range_status),
         ("有没有系统性偏差？",
          "pred~obs 斜率/截距 + Bland-Altman 一致性界限",

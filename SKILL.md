@@ -26,7 +26,7 @@ agent_created: true
 | `models[].fixed` 里拼错参数名现在报 `E-MOD-004` | 旧实现只 warn 然后**用默认值训练**，你钉死的值根本没生效 | 按报错给的最接近候选名改 |
 | `split.group_col` 现在真的生效 | 旧实现只在报告里拼字符串，分组永远按 `data.id_col`；现在给了就用它，且自动剔出特征矩阵 | 本来想按 `sample_id` 分组却写了别的列，现在会真的按那列分组 |
 | `data.feature_mode` 只接受 `all_numeric_except_roles` | 旧实现是死字段，写什么都不生效 | 要精确控制特征请用 `feature_cols` / `drop_cols` |
-| **新增**：逐折预测值越界检查 | 线性模型在小样本上外推爆炸时，旧版只会显示"R²=−38"，看不出是数值跑飞 | 看 `fold_results.csv` 的 `pred_range_ratio` / `pred_n_extreme`，超 5 倍极差会 warn |
+| **新增**：逐折预测值越界检查 | 线性模型在小样本上外推爆炸时，旧版只会显示"R²=−38"，看不出是数值跑飞 | 看 `fold_results.csv` 的 `pred_range_ratio` / `pred_n_extreme`，超 2 倍极差会 warn |
 | **新增**：VIP 可靠性标记 | PLS 自己没预测力时，VIP 排序仍是"看起来很专业"的噪声 | `vip.csv` 多 `pls_cv_r2` / `vip_reliable` 两列；不可引用时报告自动改 ⚠ |
 | `--dry-run` 不再对 `holdout_random` 谎报折数 | 旧版打印"外层 5 折"，实际只跑 1 折 | 无需操作，数字改对了 |
 | 版本号统一 | `SKILL.md` 与 `sml.__version__` 现在一致（旧版是 1.1.0 / 1.0.0） | 引用时写明 1.1.1 |
