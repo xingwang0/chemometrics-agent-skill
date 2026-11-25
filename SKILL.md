@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "科研级机器学习预测建模流程（材料/化学/光谱为主）。当用户要做近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，或配方/工艺参数等表格数据的回归与分类预测；要写论文 Methods、画预测散点/Williams plot/校准曲线；要算 RPD、VIP、适用域、Y-randomization 置换检验；要回答审稿人关于交叉验证、数据泄漏、过拟合、重复测量、批次效应的质疑时使用。内置分组交叉验证 + 嵌套调参 + 重复 CV + 置换检验 + 按组 bootstrap 置信区间 + 适用域四法 + 审稿质疑清单。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.1.0"
+version: "1.1.1"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
@@ -14,6 +14,22 @@ agent_created: true
 把「审稿级严谨」的预测建模流程固化成一条命令：**原始表格 → 数据审计 → 嵌套分组 CV → 置换检验 → 适用域 → 论文级图表 + Methods 草稿 + 审稿清单**。
 
 不适用于：纯统计假设检验（ANOVA/t 检验）、深度学习训练（本机无 torch）、图像分割、NLP。
+
+## v1.1.1 行为变更（升级前先看这一段）
+
+上个版本有 8 处在「静默改变结果」或「该拦不拦」，这一版全部改成显式失败或显式告警。
+**升级后旧配置可能直接报错，这是故意的**——每条的报错里都写了怎么改。
+
+| 变更 | 影响 | 处理 |
+|---|---|---|
+| `holdout_random` + `split.repeats>1` 现在报 `E-CFG-042` | 旧实现会跑 N 个划分、把测试集混着算池化指标，还悄悄把 `metric_basis` 从 pooled 改成 fold | 复现别人的单次划分 → `repeats=1`；要多次划分的分布 → 外层循环改 `--seed` |
+| `models[].fixed` 里拼错参数名现在报 `E-MOD-004` | 旧实现只 warn 然后**用默认值训练**，你钉死的值根本没生效 | 按报错给的最接近候选名改 |
+| `split.group_col` 现在真的生效 | 旧实现只在报告里拼字符串，分组永远按 `data.id_col`；现在给了就用它，且自动剔出特征矩阵 | 本来想按 `sample_id` 分组却写了别的列，现在会真的按那列分组 |
+| `data.feature_mode` 只接受 `all_numeric_except_roles` | 旧实现是死字段，写什么都不生效 | 要精确控制特征请用 `feature_cols` / `drop_cols` |
+| **新增**：逐折预测值越界检查 | 线性模型在小样本上外推爆炸时，旧版只会显示"R²=−38"，看不出是数值跑飞 | 看 `fold_results.csv` 的 `pred_range_ratio` / `pred_n_extreme`，超 5 倍极差会 warn |
+| **新增**：VIP 可靠性标记 | PLS 自己没预测力时，VIP 排序仍是"看起来很专业"的噪声 | `vip.csv` 多 `pls_cv_r2` / `vip_reliable` 两列；不可引用时报告自动改 ⚠ |
+| `--dry-run` 不再对 `holdout_random` 谎报折数 | 旧版打印"外层 5 折"，实际只跑 1 折 | 无需操作，数字改对了 |
+| 版本号统一 | `SKILL.md` 与 `sml.__version__` 现在一致（旧版是 1.1.0 / 1.0.0） | 引用时写明 1.1.1 |
 
 ## 路径与首次使用
 

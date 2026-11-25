@@ -310,9 +310,9 @@ def resolve_models(cfg: dict, task: str) -> list[ModelSpec]:
 # --------------------------------------------------------------------------- #
 # 估计器
 # --------------------------------------------------------------------------- #
-def build_estimator(spec: ModelSpec, seed: int) -> BaseEstimator:
+def build_estimator(spec: ModelSpec, seed: int, apply_fixed: bool = True) -> BaseEstimator:
     est = _build_estimator_base(spec, seed)
-    if spec.fixed:
+    if spec.fixed and apply_fixed:
         # 容忍 `fixed` 里带 model__ 前缀（用户从 search 里复制过来时的常见写法）
         applied = {str(k).removeprefix("model__"): v for k, v in spec.fixed.items()}
         try:
@@ -423,12 +423,16 @@ def build_pipeline(
     cfg: dict,
     feature_names: list[str] | None = None,
     seed: int = 0,
+    apply_fixed: bool = True,
 ) -> Pipeline:
     """预处理 → 标准化 → 模型，全部装在一个 Pipeline 里。
 
     预处理候选（``prep__which``）与模型超参一起在内层搜索，保证：
     * 任何 fit-time 统计量（MSC 参考谱、标准化均值方差）只看训练折；
     * "挑预处理"这个动作本身也在交叉验证内部完成。
+
+    ``apply_fixed=False`` 只给配置期校验用：那时 fixed 还没校验过，先别应用，
+    否则拼错的键会先打一句「已忽略」的 warn 再报错，读起来自相矛盾。
     """
     cands = cfg["preprocess"]["candidates"]
     steps: list[tuple[str, Any]] = [
@@ -439,7 +443,7 @@ def build_pipeline(
     ]
     if cfg["preprocess"].get("scale", True):
         steps.append(("scale", StandardScaler(with_mean=bool(cfg["preprocess"].get("scale_with_mean", False)))))
-    steps.append(("model", build_estimator(spec, seed)))
+    steps.append(("model", build_estimator(spec, seed, apply_fixed=apply_fixed)))
     return Pipeline(steps)
 
 
@@ -607,10 +611,11 @@ def validate_spaces(specs: list[ModelSpec], cfg: dict) -> None:
                 f"回归请改用 {sorted(SUPPORTED_KINDS - CLASSIFICATION_ONLY)[:8]}… "
                 f"（如 ridge / lasso / svr / knn / rf）。")
         space = search_space(spec)
-        if not space:
+        if not space and not spec.fixed:
+            # 既没有搜索空间也没有 fixed：这个模型只按构造器默认值训练，没什么可校验的
             continue
         try:
-            probe = build_pipeline(spec, cfg, feature_names=None, seed=0)
+            probe = build_pipeline(spec, cfg, feature_names=None, seed=0, apply_fixed=False)
             valid = set(probe.get_params().keys())
         except Exception as exc:  # noqa: BLE001 —— 估计器本身构造失败也要早报
             raise ConfigError(
@@ -635,6 +640,23 @@ def validate_spaces(specs: list[ModelSpec], cfg: dict) -> None:
                 bad.append(f"{key}（{str(exc).replace(chr(10), ' ')[:80]}）")
         if bad:
             raise ConfigError("E-MOD-002", _space_error_message(spec, bad, valid))
+
+        # fixed 里的键走同一套白名单。旧实现只在 build_estimator 里 try/except + warn，
+        # 于是"fixed 里参数名拼错"等于安静地用默认值训练——比 search 拼错更危险，
+        # 因为 fixed 是用户明确想钉死的值（如 subsample=0.8），静默失效根本看不出来。
+        bad_fixed: list[str] = []
+        for key in (spec.fixed or {}):
+            k = str(key)
+            if not k.startswith("model__"):
+                k = f"model__{k}"
+            leaf = k.split("__")[-1]
+            if k not in valid and leaf not in blind:
+                bad_fixed.append(k)
+        if bad_fixed:
+            raise ConfigError("E-MOD-004", _space_error_message(spec, bad_fixed, valid)
+                              .replace("搜索空间里有无法被估计器解析的参数",
+                                       "fixed 里有无法被估计器解析的参数（这些值本该被钉死，"
+                                       "拼错会静默失效）"))
 
 
 def model_summary(specs: list[ModelSpec]) -> list[dict[str, Any]]:

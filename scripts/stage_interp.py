@@ -53,6 +53,37 @@ def _best_pls_components(ctx) -> int:
     return max(counts, key=counts.get) if counts else 10
 
 
+# VIP 只有在 PLS 基线本身有预测力时才可解读：VIP 是 PLS 权重的衍生物，
+# PLS 学不到东西时 VIP 排序依然"看起来很专业"，但那是噪声的投影。
+VIP_MIN_PLS_R2 = 0.10
+
+
+def _pls_cv_r2(ctx) -> float | None:
+    """PLS 基线在 CV 里的主指标值（口径跟随该行的 metric_basis）。
+
+    实测反例：PLS 的 CV R² ≈ 0.01，VIP 首位给出 W_content，而置换重要性首位是
+    P_content —— 两个"最重要特征"方向完全不同。不标注来源模型的性能，读者只能
+    二选一凭感觉，而正确做法是"这个 VIP 不可引用"。
+    """
+    path = ctx.run_dir / "cv" / "metrics_summary.csv"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path)
+    except Exception:  # noqa: BLE001 —— 读不到就不判可靠性，不阻断 interp
+        return None
+    if "model" not in df.columns:
+        return None
+    sub = df[df["model"].astype(str).str.lower().str.startswith("pls")]
+    if sub.empty:
+        return None
+    row = sub.iloc[0]
+    basis = str(row.get("metric_basis", "fold"))
+    col = "r2" if basis == "pooled" else "r2_mean"
+    val = pd.to_numeric(pd.Series([row.get(col, np.nan)]), errors="coerce").iloc[0]
+    return float(val) if np.isfinite(val) else None
+
+
 def run_interp(ctx) -> dict:
     cfg = ctx.cfg
     ds = ctx.ds
@@ -102,6 +133,9 @@ def run_interp(ctx) -> dict:
     # 2) VIP（PLS 是化学计量学基线，始终单独算）
     if cfg["interp"].get("vip", True):
         k = _best_pls_components(ctx)
+        pls_r2 = _pls_cv_r2(ctx)
+        # PLS 自己没预测力时，VIP 只是噪声的投影：照常算出来，但必须打上"不可引用"
+        reliable = pls_r2 is not None and pls_r2 >= VIP_MIN_PLS_R2
         try:
             y_vec = np.asarray(ds.targets.get(ctx.target, ds.y))
             # VIP/SHAP 是全量描述性分析，不是 CV 性能估计；缺失值用全量中位数
@@ -127,22 +161,43 @@ def run_interp(ctx) -> dict:
                 vip_df["vip_q025"] = np.quantile(B, 0.025, axis=0)
                 vip_df["vip_q975"] = np.quantile(B, 0.975, axis=0)
                 vip_df["stable_above_1"] = vip_df["vip_q025"] > 1.0
+            # 可靠性标记写在每一行上，读 csv 的人一眼能看到"这份 VIP 来自多强的 PLS"
+            vip_df["pls_cv_r2"] = np.nan if pls_r2 is None else float(pls_r2)
+            vip_df["vip_reliable"] = bool(reliable)
             vip_df = vip_df.sort_values("vip", ascending=False).reset_index(drop=True)
             vip_df.to_csv(out_dir / "vip.csv", index=False, encoding="utf-8")
             result["vip"] = {"n_components": k, "n_above_1": int((vip > 1).sum()),
+                             "pls_cv_r2": pls_r2, "reliable": bool(reliable),
+                             "min_pls_r2": VIP_MIN_PLS_R2,
                              "top": vip_df.head(10)[["feature", "vip"]].to_dict(orient="records")}
+            if not reliable:
+                why = ("CV 里没有 PLS 结果（无法判定）" if pls_r2 is None
+                       else f"PLS 的 CV R²={pls_r2:.3f} < {VIP_MIN_PLS_R2:.2f}")
+                result["vip"]["note"] = (
+                    f"{why}：VIP 来自一个没有预测力的模型，排序只是噪声的投影。"
+                    f"它只能作为对照，不能当结论；请用置换重要性（importance.csv）或 SHAP。")
+                warn(f"VIP 不可引用（{why}）：已标 vip_reliable=false，"
+                     f"报告会提示改用置换重要性/SHAP，不要拿 VIP 首位写结论")
             # 两种排序法给出不同首位时必须提示：读者只会看到一个「最重要」，
             # 而 VIP 与置换的重要性定义完全不同（VIP 含协方差结构，置换含模型依赖）。
             tops = result.get("top_bands") or []
             if tops and not vip_df.empty:
                 top_perm, top_vip = str(tops[0].get("label")), str(vip_df.iloc[0]["feature"])
                 if top_perm != top_vip:
+                    base_note = ("VIP 与置换重要性的首位不一致：前者偏向与响应协变的投影方向，"
+                                 "后者衡量模型对该列的依赖；论文中应并列报告，不能只取一个")
+                    if not reliable:
+                        base_note = (f"VIP 首位（{top_vip}）与置换首位（{top_perm}）不一致，且 VIP "
+                                     f"来源模型已失效（{result['vip'].get('note', '')}）——"
+                                     f"以置换重要性为准，VIP 不写进结论")
                     result["vip_vs_permutation"] = {
                         "permutation_top": top_perm, "vip_top": top_vip,
-                        "note": ("VIP 与置换重要性的首位不一致：前者偏向与响应协变的投影方向，"
-                                 "后者衡量模型对该列的依赖；论文中应并列报告，不能只取一个"),
+                        "vip_reliable": bool(reliable),
+                        "note": base_note,
                     }
-                    warn(f"VIP 首位（{top_vip}）与置换首位（{top_perm}）不一致，已在报告中标注")
+                    warn(f"VIP 首位（{top_vip}）与置换首位（{top_perm}）不一致"
+                         + ("；且 VIP 来源模型已失效，以置换为准" if not reliable
+                            else "，已在报告中标注"))
             info(f"VIP 完成：{int((vip > 1).sum())} 个特征 VIP>1（PLS {k} 成分）")
         except Exception as exc:  # noqa: BLE001
             warn(f"VIP 计算失败：{type(exc).__name__}: {exc}")

@@ -89,7 +89,7 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `id_col` | null | **分组键**（sample_id）。null 时按命名约定猜，再退化为特征指纹 |
 | `batch_col` | null | 批次/仪器/日期，用于留一批次外部验证 |
 | `replicate_col` | null | 同一样品第几次测量 |
-| `feature_mode` | `all_numeric_except_roles` | 特征选择方式 |
+| `feature_mode` | `all_numeric_except_roles` | 特征选择方式。**目前只实现这一种语义**（所有数值列减去角色列）；写别的值报 `E-IO-025`。要精确控制请用 `feature_cols` / `drop_cols` |
 | `feature_cols` | null | 显式指定特征列（优先于自动识别） |
 | `drop_cols` | `[]` | 要从特征里剔除的列（备注、序号、派生量…） |
 | `exclude_from_features` | `[]` | 额外剔除的列。**多目标 fan-out 时由 `run_pipeline` 自动填入全部目标列**（子 run 的 `task.target` 只剩一个，若不带这项，兄弟目标会留在特征里） |
@@ -104,15 +104,29 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `strategy` | `nested_group` | `nested_group` / `loo_batch` / `holdout_batch` / `holdout_random` |
-| `group_col` | null | null 时用 `data.id_col` |
-| `outer.n_splits` | 5 | 外层折数；样品数不足时自动降级并警告 |
+| `strategy` | `nested_group` | `nested_group` / `loo_batch` / `holdout_batch` / `holdout_random`（见下方语义表） |
+| `group_col` | null | 分组键。**给了就真的生效**（列不存在报 `E-IO-024`），null 时回退 `data.id_col`，两者都没有则按特征指纹推断。该列会自动从特征矩阵剔除 |
+| `outer.n_splits` | 5 | 外层折数；样品数不足时自动降级并警告。`holdout_random` 下恒为 1 折 |
 | `outer.shuffle` | true | sklearn 1.9 的 GroupKFold 支持打乱 |
 | `inner.n_splits` | 3 | 内层折数（调参用） |
-| `repeats` | 5 | 重复次数（不同随机种子） |
+| `repeats` | 5 | 重复次数（不同随机种子）。**`holdout_random` 下必须为 1**，否则报 `E-CFG-042` |
 | `stratify` | true | 分类且每组单类时启用分层分组划分 |
 | `holdout_batch` | null | `strategy=holdout_batch` 时必填 |
 | `test_size` | 0.2 | 仅 `holdout_random` 用 |
+
+### 四种划分的语义差别（别混用）
+
+| strategy | 外层折 | 随机性 | `repeats` | 适用场景 |
+|---|---|---|---|---|
+| `nested_group` | k 折分组 | 每 repeat 换种子 | 有意义，5–10 | 主结果，报告 mean±sd |
+| `loo_batch` | 批次数 | 无（确定性） | 自动降为 1 | 真外推验证 |
+| `holdout_batch` | 1 | 无（确定性） | 自动降为 1 | 指定批次做外部测试 |
+| `holdout_random` | **1** | 每次换 `seed` 换划分 | **必须 1** | 复现别人论文里的单次 70/30 |
+
+> `holdout_random` 为什么不能配 `repeats>1`：那会跑 N 个不同划分，把 N 个测试集的行
+> 混在一起算池化 OOF 指标（同一样品被重复计入），同时让 `n_folds_ok` 从 1 变 N、
+> `metric_basis` 由 `pooled` 静默变成 `fold` —— 拿到的是另一个统计量。
+> 要"多次随机划分的均值"，请外层循环改 `--seed` 各跑一次，用 `nested_group` 做正式结果。
 
 **budget 会覆盖**：`repeats`、`inner.n_splits`、`permutation.n_perm`、
 `evaluation.bootstrap.n`、各随机搜索模型的 `n_iter`（取较小者）。
@@ -278,13 +292,17 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `E-CFG-032` | 配置文件里的预算项（repeats/n_perm/…）被 `--budget` 改写（附被改的键与原值） |
 | `E-CFG-040` | `runtime.seed_scheme` 不是 `legacy` / `per_model`（默认 legacy） |
 | `E-CFG-041` | `preprocess.stratify_sampling` 不是布尔值（默认 false） |
+| `E-CFG-042` | `holdout_random` 配了 `repeats>1`：会混合多个划分的测试集、口径静默改变（v1.1.1 起直接拒绝） |
 | `E-MOD-001` | 该 kind 无法在当前任务下构造 |
 | `E-MOD-002` | 搜索空间里有无法被估计器解析的参数（附最接近的候选名） |
 | `E-MOD-003` | 分类专用 kind 被用于回归任务 |
+| `E-MOD-004` | `fixed` 里有无法被估计器解析的参数（这些值本该被钉死，拼错会静默失效） |
 | `E-IO-001~007` | 文件不存在、格式不支持、长表对齐失败 |
 | `E-IO-009~012` | 标签顺序 / 类别数 / 编码错误 |
 | `E-IO-013~021` | 列角色、目标缺失、特征缺失 |
 | `E-IO-023` | `data.exclude_from_features` 里的列不存在 |
+| `E-IO-024` | `split.group_col` 指定的列不在表头中 |
+| `E-IO-025` | `data.feature_mode` 取值不受支持（只实现 `all_numeric_except_roles`） |
 | `E-CV-001~003` | 分组数不足、批次数不足、holdout 批次不存在 |
 | `E-STAGE-001~003` | 上游产物缺失、主指标缺失、模型名不在配置中（附"漏了 --set"的排查提示） |
 | `E-STAGE-004` | 多目标 CV 结果未指定 target 就要出报告（会跨目标挑最优、CI 串目标） |

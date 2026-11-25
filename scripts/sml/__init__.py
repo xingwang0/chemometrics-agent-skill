@@ -13,5 +13,5 @@ provenance   复现锁定（版本矩阵 + 三哈希 + 种子）
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.1"
 __all__ = ["__version__"]

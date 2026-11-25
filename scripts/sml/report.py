@@ -577,6 +577,10 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
     ds = ctx.ds
     audit = _read_json_if(ctx.run_dir, "audit/audit.json")
     findings = {f.get("key"): f for f in audit.get("findings", [])}
+    interp_json = _read_json_if(ctx.run_dir, "interp/interp.json")
+    cv_json = _read_json_if(ctx.run_dir, "cv/cv_summary.json")
+    vip_info = (interp_json.get("vip") or {}) if interp_json else {}
+    range_flags = cv_json.get("prediction_range_flags") or {}
     summary = tables.get("T2_performance", pd.DataFrame())
     has_replicate = (ds.groups_per_sample().max() > 1)
     has_batch = ds.batch is not None
@@ -588,6 +592,16 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
     comp_ok = not comp.empty
     best_r2 = block.get("r2")
     rpd = block.get("rpd")
+
+    if range_flags:
+        _detail = "；".join(
+            f"{m} {v.get('n_folds')}/{v.get('n_folds_total')} 折越界"
+            f"（最大 {_fmt(v.get('max_ratio'), 1)} 倍极差）"
+            for m, v in list(range_flags.items())[:3])
+        range_status = (f"⚠ {_detail}：这些折的指标反映外推爆炸（量纲跑飞），"
+                        f"不是模型能力，不要直接引用")
+    else:
+        range_status = "✓ 逐折检查通过"
 
     rows = [
         ("是不是随机划分导致同一样品的另一次测量泄漏进了训练集？",
@@ -617,7 +631,14 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
          _comparison_status(block, comp_ok)),
         ("为什么不用 PLS？",
          "PLS 为强制基线（缺失时自动注入），并给 VIP 分数",
-         "interp/vip.csv", "✓"),
+         "interp/vip.csv",
+         ("⚠ VIP 不可引用：来源 PLS 的 CV R²="
+          f"{_fmt(vip_info.get('pls_cv_r2'), 3)} < {_fmt(vip_info.get('min_pls_r2'), 2)}，"
+          "请改用置换重要性/SHAP")
+         if vip_info and vip_info.get("reliable") is False else "✓"),
+        ("预测值有没有跑出目标量纲？",
+         "逐折比对预测值与训练集目标极差：越界超过 5 倍即判为外推爆炸并报警",
+         "cv/fold_results.csv（pred_range_ratio / pred_n_extreme）", range_status),
         ("有没有系统性偏差？",
          "pred~obs 斜率/截距 + Bland-Altman 一致性界限",
          "figures/F5_calibration.png、tables/T2_performance.csv", "✓"),

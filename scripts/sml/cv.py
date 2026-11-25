@@ -27,6 +27,7 @@ from sklearn.model_selection import (
 )
 
 from .config import ConfigError
+from .metrics import prediction_range_check
 from .models import ModelSpec, build_pipeline, prep_label, search_space
 from .preprocess import prep_name
 from .tune import count_candidates, expand_space, inner_search, scoring_for
@@ -217,14 +218,18 @@ def estimate_fit_calls(ds, cfg: dict, specs: list[ModelSpec]) -> dict[str, Any]:
 
 def describe_split_plan(ds, cfg: dict) -> dict[str, Any]:
     strategy = cfg["split"]["strategy"]
+    # holdout_random 只产 1 个外层折（GroupShuffleSplit n_splits=1）。旧实现直接把
+    # cfg.split.outer.n_splits 填进这里，dry-run 会打印"外层 5 折"，实际只跑 1 折。
+    outer_n_splits = 1 if strategy == "holdout_random" else int(cfg["split"]["outer"]["n_splits"])
     plan = {
         "strategy": strategy,
         "n_rows": ds.n_samples,
         "n_groups": ds.n_groups,
         "repeats": effective_repeats(cfg),
-        "outer_n_splits": int(cfg["split"]["outer"]["n_splits"]),
+        "outer_n_splits": outer_n_splits,
         "inner_n_splits": int(cfg["split"]["inner"]["n_splits"]),
-        "group_col": cfg["data"].get("id_col") or "auto_fingerprint",
+        "group_col": (cfg.get("split", {}).get("group_col")
+                      or cfg["data"].get("id_col") or "auto_fingerprint"),
         "n_rows_by_target": {
             t: int(ds.target_available.get(t, ds.n_samples)) for t in ds.target_names
         },
@@ -246,6 +251,10 @@ def describe_split_plan(ds, cfg: dict) -> dict[str, Any]:
         plan["note"] = "留一批次外验证：每折训一批、测另一批，这是审稿人最认的真外推"
     elif strategy == "holdout_batch":
         plan["note"] = f"固定留出批次 {cfg['split'].get('holdout_batch')} 作为测试集"
+    elif strategy == "holdout_random":
+        test_size = float(cfg["split"].get("test_size", 0.2))
+        plan["note"] = (f"单次随机划分：训练 {1 - test_size:.0%} / 测试 {test_size:.0%}，"
+                        f"只有 1 个外层折（无重复；要多次划分请外层循环改 --seed）")
     return plan
 
 
@@ -415,6 +424,12 @@ def run_nested_cv(
                         "scoring": scoring,
                         "proba_kind": kind_te,
                     }
+                    if task == "regression":
+                        # 预测值越界检查（外推爆炸）：线性模型在小样本上会把预测推到
+                        # 目标量纲之外，而 R² 只会显示"很差"，看不出是数值爆炸。
+                        rng_chk = prediction_range_check(y_tr_all, pred_te)
+                        fold_row["pred_range_ratio"] = rng_chk["ratio"]
+                        fold_row["pred_n_extreme"] = rng_chk["n_extreme"]
                     for key, val in m_te.items():
                         fold_row[key] = val
                     if task == "regression":

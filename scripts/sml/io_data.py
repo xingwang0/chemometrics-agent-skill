@@ -346,7 +346,21 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
     if rep_col and rep_col not in df.columns:
         raise ConfigError("E-IO-017", f"data.replicate_col={rep_col!r} 不在表头中")
 
-    roles = {c for c in (id_col, batch_col, rep_col, target_col) if c}
+    # split.group_col 曾经是死字段：只在报告/审计里拼显示字符串，真正的分组键永远是
+    # data.id_col。用户写了 group_col 却看到 CV 按 id_col 分组，且没有任何提示。
+    # 现在让它真正生效：显式给了就用它，没给才回退 id_col。
+    group_col = cfg.get("split", {}).get("group_col") or None
+    if group_col and group_col not in df.columns:
+        raise ConfigError(
+            "E-IO-024",
+            f"split.group_col={group_col!r} 不在表头中。若想用 sample_id 分组请写 "
+            f"split.group_col=sample_id；留空则回退 data.id_col",
+        )
+    if group_col and id_col and group_col != id_col:
+        notes.append(f"分组键取 split.group_col={group_col!r}（而非 data.id_col={id_col!r}）")
+
+    # 分组键必须从特征里剔除：它是样品标识，进特征等于把"样品身份"当预测依据。
+    roles = {c for c in (id_col, batch_col, rep_col, target_col, group_col) if c}
     roles.update(str(t) for t in cfg["task"]["target"])      # 全部目标列都不是特征
     roles.update(data_cfg.get("drop_cols") or [])
 
@@ -373,6 +387,19 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
         notes.append(f"按 data.exclude_from_features 从特征中排除：{extra_excl}")
 
     # ---- 特征列 ----
+    # data.feature_mode 之前只在 DEFAULTS 里定义、从来没有被读过（改它没有任何效果）。
+    # 现在只有一种实现方式，就把它变成一个"取值必须对得上"的字段：
+    # 写错值直接报错，而不是让它安静地什么都不做。
+    mode = str(data_cfg.get("feature_mode") or "all_numeric_except_roles")
+    if mode != "all_numeric_except_roles":
+        raise ConfigError(
+            "E-IO-025",
+            f"data.feature_mode 目前只实现了一种语义 all_numeric_except_roles（所有数值列减去"
+            f"角色列），收到 {mode!r}。\n"
+            f"  要精确控制特征，请用 data.feature_cols 显式列出（此时 feature_mode 不生效），"
+            f"或用 data.drop_cols 排除。",
+        )
+
     explicit = data_cfg.get("feature_cols")
     if explicit:
         missing = [c for c in explicit if c not in df.columns]
@@ -459,13 +486,14 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
     X = Xdf.to_numpy(dtype=np.float32)
 
     # ---- 分组 ----
-    if id_col:
-        groups = df[id_col].astype(str).to_numpy()
+    key_col = group_col or id_col
+    if key_col:
+        groups = df[key_col].astype(str).to_numpy()
         n_unique = len(pd.unique(groups))
         if n_unique == len(groups):
             notes.append(
-                "sample_id 每行都唯一，说明数据里没有重复测量；分组 CV 退化为普通 K 折 "
-                "（若同一材料确实多次测量但未标注，请补 replicate/sample_id）"
+                f"{key_col} 每行都唯一，说明数据里没有重复测量；分组 CV 退化为普通 K 折 "
+                f"（若同一材料确实多次测量但未标注，请补 replicate/sample_id）"
             )
     else:
         groups = _fingerprint_ids(X)

@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sml.compare import rank_models, compare_models  # noqa: E402
 from sml.cv import effective_repeats, oof_group_metrics, run_nested_cv  # noqa: E402
 from sml.metrics import (  # noqa: E402
-    aggregate_repeats, bootstrap_classification, bootstrap_regression,
+    PRED_RANGE_FACTOR, aggregate_repeats, bootstrap_classification, bootstrap_regression,
     describe_pooled_rows, mark_metric_basis, oof_score_matrix,
 )
 from sml.models import model_summary, resolve_models  # noqa: E402
@@ -120,6 +120,34 @@ def _failure_summary(folds: pd.DataFrame, failed: pd.Series) -> dict[str, dict]:
     return out
 
 
+def _prediction_range_summary(folds: pd.DataFrame, failed: pd.Series) -> dict[str, dict]:
+    """按模型汇总"预测值跑出目标量纲"的折，供报告与 cv_summary 置顶告警。
+
+    只统计未失败且列存在的折；分类任务没有 pred_n_extreme 列，直接返回空。
+    这类折的指标（R² 可能是 −37）反映的是线性外推爆炸，不是模型能力——
+    两者的处理方式完全不同（前者查数据/换模型，后者才是模型不好）。
+    """
+    if folds.empty or "pred_n_extreme" not in folds.columns:
+        return {}
+    extreme = pd.to_numeric(folds["pred_n_extreme"], errors="coerce").fillna(0)
+    sub = folds[(~failed) & (extreme > 0)]
+    if sub.empty:
+        return {}
+    out: dict[str, dict] = {}
+    ok_total = folds[~failed]
+    for model, m in sub.groupby("model", dropna=False):
+        total = int((ok_total["model"].astype(str) == str(model)).sum())
+        ratio = pd.to_numeric(m["pred_range_ratio"], errors="coerce")
+        out[str(model)] = {
+            "n_folds": int(len(m)),
+            "n_folds_total": total,
+            "max_ratio": (float(np.nanmax(ratio.to_numpy())) if ratio.notna().any()
+                          else float("nan")),
+            "n_rows_extreme": int(extreme.loc[m.index].sum()),
+        }
+    return out
+
+
 def _best_by_primary(summary: pd.DataFrame, task: str) -> dict[str, dict] | None:
     """每个 target 各自的最优模型（多目标时 summary 是纵向拼接表，不能全表挑一个）。"""
     if summary.empty:
@@ -162,8 +190,11 @@ def run_cv(ctx) -> dict:
     write_json(out_dir / "models.json", model_summary(specs))
 
     total_rounds = effective_repeats(cfg)
+    # holdout_random 只有 1 个外层折；直接打印 outer.n_splits 会让人以为跑了 5 折
+    n_outer_eff = (1 if cfg["split"]["strategy"] == "holdout_random"
+                   else int(cfg["split"]["outer"]["n_splits"]))
     info(f"开始嵌套 CV：{len(specs)} 个模型 × {total_rounds} 次重复 × 外层 "
-         f"{cfg['split']['outer']['n_splits']} 折 × 内层 {cfg['split']['inner']['n_splits']} 折")
+         f"{n_outer_eff} 折 × 内层 {cfg['split']['inner']['n_splits']} 折")
 
     counter = {"n": 0}
 
@@ -194,6 +225,15 @@ def run_cv(ctx) -> dict:
                  f"这不是'效果差'，而是配置或依赖错误：{finfo['first_error']}")
         else:
             warn(f"模型 {model!r} 有 {finfo['n_failed']}/{finfo['n_total']} 折失败：{finfo['first_error']}")
+
+    # 预测值越界（外推爆炸）：R² 只会显示"这个模型很差"，看不出是数值跑飞了。
+    # 有这类折时必须在报告顶部说清楚，否则论文里会出现"某模型 R²=−38"这种被误读的结论。
+    range_flags = _prediction_range_summary(folds, failed)
+    for model, rinfo in range_flags.items():
+        warn(f"模型 {model!r} 有 {rinfo['n_folds']}/{rinfo['n_folds_total']} 折的预测值超出训练集"
+             f"目标范围 {rinfo['max_ratio']:.1f} 倍极差（阈值 {PRED_RANGE_FACTOR:.0f} 倍，"
+             f"涉及 {rinfo['n_rows_extreme']} 个越界样品）：这些折的指标反映的是外推爆炸，"
+             f"不是模型能力。先查目标尺度、极端样品与线性外推，不要直接把 R² 写进论文")
     # 主汇总口径：按 (target, model) —— 预处理是逐折内部选的超参，不参与排名
     model_keys = [k for k in ("target", "model") if k in ok_folds.columns]
     summary = aggregate_repeats(ok_folds, metric_cols, group_keys=tuple(model_keys))
@@ -265,6 +305,7 @@ def run_cv(ctx) -> dict:
         "n_folds": int(len(folds)),
         "n_failed": int(failed.sum()),
         "failed_models": fail_info,
+        "prediction_range_flags": range_flags,
         "n_models_usable": int(len([s for s in specs if s.name not in
                                     {k for k, v in fail_info.items() if v["all_failed"]}])),
         "metric_cols": metric_cols,

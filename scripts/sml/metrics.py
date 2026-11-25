@@ -31,7 +31,11 @@ __all__ = [
     "bootstrap_classification", "aggregate_repeats", "metric_direction",
     "METRIC_LABELS", "format_metric", "oof_score_matrix",
     "mark_metric_basis", "describe_pooled_rows", "MIN_OK_FOLDS",
+    "prediction_range_check", "PRED_RANGE_FACTOR",
 ]
+
+# 预测值越界的判定倍数：超出训练集目标极差的这么多倍即视为"量纲爆炸"
+PRED_RANGE_FACTOR = 5.0
 
 METRIC_LABELS = {
     "r2": "R²", "rmse": "RMSE", "mae": "MAE", "bias": "Bias(ME)", "rpd": "RPD",
@@ -85,6 +89,52 @@ def format_metric(name: str, value: Any, digits: int = 4) -> str:
 # --------------------------------------------------------------------------- #
 # 回归
 # --------------------------------------------------------------------------- #
+def prediction_range_check(
+    y_train: np.ndarray,
+    y_pred: np.ndarray,
+    factor: float = PRED_RANGE_FACTOR,
+) -> dict[str, float]:
+    """检查预测值是否跑出目标量纲（外推爆炸的报警器）。
+
+    为什么必须有：线性模型（PLS/PCR/ridge）在"训练集很小 + 测试样品落在潜在空间之外"
+    时会把预测推到荒谬的量级。实测一例：真实 153 / 176 mV 的样品被 PLS 预测成
+    2431 / 2457 mV，单折 R² 掉到 −37.8；管线此前照单全收，报告里只是安静地显示
+    −37.8，没有任何提示——读者会以为"这个模型很差"，实际是"这个模型在这几个样品上
+    数值爆炸了"，两者的处理方式完全不同。
+
+    判据用**相对量**（训练集 y 的极差）而不是绝对值：目标可能是 0–1 的分数，也可能是
+    0–500 的过电位，绝对阈值没法通用。
+
+    返回 ``ratio`` = 最大越界距离 / 训练集极差。ratio=0 表示全部落在训练集范围内；
+    ratio>``factor`` 视为量纲爆炸（``n_extreme`` 计数）。
+    """
+    ytr = np.asarray(y_train, dtype=float)
+    ypr = np.asarray(y_pred, dtype=float)
+    ytr = ytr[np.isfinite(ytr)]
+    ypr = ypr[np.isfinite(ypr)]
+    out: dict[str, float] = {
+        "ratio": float("nan"), "n_extreme": 0.0, "n_pred": float(ypr.size),
+        "y_min": float("nan"), "y_max": float("nan"),
+        "pred_min": float("nan"), "pred_max": float("nan"),
+    }
+    if ytr.size < 2 or ypr.size == 0:
+        return out
+    lo, hi = float(ytr.min()), float(ytr.max())
+    span = hi - lo
+    if not np.isfinite(span) or span <= 0:
+        # 训练集目标是常数：用绝对值兜底，避免除零造出 inf
+        span = max(abs(hi), 1.0)
+    over = np.maximum(ypr - hi, lo - ypr)
+    over = np.clip(over, 0.0, None)
+    out.update({
+        "ratio": float(over.max() / span),
+        "n_extreme": float((over > factor * span).sum()),
+        "y_min": lo, "y_max": hi,
+        "pred_min": float(ypr.min()), "pred_max": float(ypr.max()),
+    })
+    return out
+
+
 def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     y = np.asarray(y_true, dtype=np.float64).ravel()
     p = np.asarray(y_pred, dtype=np.float64).ravel()

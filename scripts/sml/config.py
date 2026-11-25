@@ -478,6 +478,26 @@ def validate_config(cfg: dict) -> list[str]:
     if strategy == "holdout_batch" and not cfg["split"]["holdout_batch"]:
         raise ConfigError("E-CFG-018", "strategy=holdout_batch 时必须指定 split.holdout_batch")
 
+    # holdout_random 只产出一次随机划分（GroupShuffleSplit n_splits=1）。若 repeats>1，
+    # 旧行为是"跑 N 个不同划分、把 N 个测试集的行混在一起算池化 OOF 指标"，于是：
+    #   · 同一样品被重复计入池化指标（R²/RMSE 的分母不再是独立样品）；
+    #   · n_folds_ok 从 1 变成 N，metric_basis 由 pooled 静默变成 fold，
+    #     排名与报告跟着换口径 —— 用户以为"重复了 N 次更稳"，实际拿到的是另一个统计量。
+    # 这类口径漂移不会报错，只会让人把数字引错，所以在这里直接拦住。
+    # 注意与 loo_batch/holdout_batch 的区别：那两种划分是确定的，重复跑得到同一折，
+    # 降为 1 只省算力、不改结果；holdout_random 重复跑会改结果，故必须由用户显式决定。
+    if strategy == "holdout_random" and int(cfg["split"]["repeats"]) > 1:
+        raise ConfigError(
+            "E-CFG-042",
+            f"split.strategy=holdout_random 只做一次随机划分，但 split.repeats="
+            f"{cfg['split']['repeats']}。\n"
+            f"  旧实现会跑 {cfg['split']['repeats']} 个不同划分，把它们的测试集行混在一起算池化\n"
+            f"  OOF 指标（同一样品被重复计入），同时把 metric_basis 从 pooled 静默改成 fold。\n"
+            f"  想要「复现别人论文里的单次 70/30 划分」→ 设 split.repeats=1；\n"
+            f"  想要「多次随机划分的均值/分布」→ 外层循环改 runtime.seed 各跑一次，或用\n"
+            f"  nested_group（外层分组 K 折 + 重复），不要用 repeats 硬凑。",
+        )
+
     n_outer = int(cfg["split"]["outer"]["n_splits"])
     n_inner = int(cfg["split"]["inner"]["n_splits"])
     if n_outer < 2 or n_inner < 2:
