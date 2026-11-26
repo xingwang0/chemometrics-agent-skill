@@ -64,10 +64,10 @@ agent_created: true
 
 ## 路径与首次使用
 
-作者环境（以下两行是写死的默认值）：
+开发与验证所用环境（**不是**对你的要求，换机时按自己的填）：
 
 ```
-解释器  python
+解释器  python                # 验证环境为 3.14，版本矩阵见 references/environment.md
 技能根  /path/to/research-ml-modeling
 ```
 
@@ -96,19 +96,20 @@ Python 3.14.7 + sklearn 1.9.1 + xgboost/lightgbm/catboost + shap + matplotlib。
 ## 三条命令
 
 ```bash
-PY="python"
-ROOT="/path/to/research-ml-modeling"
+PY="python"                                    # 换成你自己的解释器
+ROOT="/path/to/research-ml-modeling"           # 换成技能目录
+DATA="/path/to/your_spectra.xlsx"
 
 # 1) 环境自检（首次/换机必跑，55 项）
 $PY "$ROOT/scripts/selfcheck.py"
 
 # 2) 预演：只审计 + 报"要拟合多少次、大概多久"，不训练
 $PY "$ROOT/scripts/run_pipeline.py" --config "$ROOT/assets/config/regression_spectra.json" \
-    --data "D:/data/NIR.xlsx" --dry-run
+    --data "$DATA" --dry-run
 
 # 3) 正式跑
 $PY "$ROOT/scripts/run_pipeline.py" --config "$ROOT/assets/config/regression_spectra.json" \
-    --data "D:/data/NIR.xlsx" --out D:/runs/nir_v1 --budget standard \
+    --data "$DATA" --out runs/nir_v1 --budget standard \
     --stages audit,cv,interp,perm,ad,report
 ```
 
