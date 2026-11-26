@@ -2,7 +2,7 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
-## [未发布]
+## [1.2.6] - 2026-11-26
 
 ### 新增
 
@@ -11,7 +11,8 @@
   `SKILL.md` 注册到 `ctx.skills`，`resourceBase` 指向包根，所以 `references/`、
   `scripts/`、`assets/` 的相对路径不用改；升级插件即升级技能，不往 `~/.dsh/skills` 复制。
   安装：`dsh plugin --profile desktop add github:xingwang0/research-ml-modeling`。
-  **技能内容未变**（仍是 1.2.5），`cv/` 产物与 55 项自检结果不受影响。
+  零依赖、无构建脚本，包内文件清单见 `package.json` 的 `files`。
+  **技能正文未变**（除版本号），`cv/` 产物与 55 项自检结果不受影响。
 
 ## [1.2.5] - 2026-11-26
 
