@@ -31,7 +31,17 @@
 
 ## 安装
 
-**方式一：作为 skill 装进 agent（推荐）**
+**方式一：DeepSeek Harness 插件（一条命令）**
+
+```bash
+dsh plugin --profile desktop add github:xingwang0/research-ml-modeling
+```
+
+装的是 `dsh-research-ml-modeling`：加载时把本仓库的 `SKILL.md` 注册成 skill，`references/`、`scripts/`、`assets/` 随包走，**不往 `~/.dsh/skills` 复制**，升级插件即升级技能。装完**新开会话**才生效。
+
+> 已经用方式二装过同名 skill 的，二者留一个就行——同名技能会被注册两次。
+
+**方式二：作为 skill 装进 agent**
 
 ```bash
 # 克隆到 agent 的 skills 目录（按你的 agent 换成实际路径）
@@ -52,7 +62,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 
 需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（55 项）确认环境。
 
-**方式二：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
+**方式三：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
 
 ## 快速开始
 

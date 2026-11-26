@@ -1,0 +1,19 @@
+# The dsh-research-ml-modeling bundle patch.
+#
+# One insert row, landing in the global layer: `research-ml-modeling` is this
+# package's plugin module (`index.js`), which registers the bundled
+# `research-ml-modeling` skill on `ctx.skills`.
+#
+# The skill body is the repository's own `SKILL.md`; `references/`, `scripts/`
+# and `assets/` sit beside it and travel with the package, because the harness
+# resolves the skill's base directory at load time. Nothing is copied into
+# `$DSH_HOME/skills`, so an upgrade of this plugin upgrades the skill with it.
+#
+# Turn the plugin off in the profile's own cordis.patch.yml with:
+#
+#   - id: research-ml-modeling
+#     disabled: true
+#
+- insert:
+    - id: research-ml-modeling
+      name: dsh-research-ml-modeling

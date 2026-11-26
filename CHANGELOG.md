@@ -2,6 +2,17 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
+## [未发布]
+
+### 新增
+
+- **DeepSeek Harness 插件封装**（`package.json` / `index.js` / `cordis.patch.yml`）
+  仓库现在同时是一个 dsh 插件包 `dsh-research-ml-modeling`：`index.js` 在加载时把
+  `SKILL.md` 注册到 `ctx.skills`，`resourceBase` 指向包根，所以 `references/`、
+  `scripts/`、`assets/` 的相对路径不用改；升级插件即升级技能，不往 `~/.dsh/skills` 复制。
+  安装：`dsh plugin --profile desktop add github:xingwang0/research-ml-modeling`。
+  **技能内容未变**（仍是 1.2.5），`cv/` 产物与 55 项自检结果不受影响。
+
 ## [1.2.5] - 2026-11-26
 
 第四轮真实数据复现（一份 100+ 行的中等规模光谱数据、2 个目标、B 套 5×3×5）暴露的 5 条问题。
