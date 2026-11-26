@@ -15,6 +15,7 @@ SHAP 在这里只作补充：它把贡献分摊到共线的各列上，结果是
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,7 @@ import pandas as pd
 
 from .cv import effective_repeats, make_outer_splits
 from .models import ModelSpec, build_pipeline
-from .utils import info, warn
+from .utils import human_duration, info, parallel_pays_off, resolve_workers, warn
 
 __all__ = [
     "build_band_groups", "band_permutation_importance", "fit_fold_models",
@@ -79,20 +80,38 @@ def build_band_groups(feature_names: list[str], band_size: int = 25) -> list[dic
     return groups
 
 
+def _fit_fold_job(X: np.ndarray, y: np.ndarray, tr: np.ndarray, feature_names,
+                  cfg: dict, spec: ModelSpec, params: dict, seed: int):
+    """重拟合一个折的整条 Pipeline（与主进程串行路径同参数、同种子）。"""
+    pipe = build_pipeline(spec, cfg, feature_names, seed=seed)
+    clean = {kk: vv for kk, vv in (params or {}).items()
+             if kk.startswith(("model__", "prep__", "scale__"))}
+    if clean:
+        try:
+            pipe.set_params(**clean)
+        except ValueError:
+            pass
+    pipe.fit(X[tr], y[tr])
+    return pipe
+
+
 def fit_fold_models(
     ctx,
     spec: ModelSpec,
     folds: pd.DataFrame | None = None,
+    n_jobs: int = 1,
 ) -> list[dict[str, Any]]:
     """按 cv 阶段选出的逐折最优超参重新拟合模型，供置换重要性与系数稳定性使用。
 
     （默认 save_models="last" 只留最后一个折的模型，所以这里按需重拟合。）
+    折与折之间互相独立，按折并行；每折的参数与种子逐位不变。
     """
     cfg = ctx.cfg
     ds = ctx.ds
     y = np.asarray(ds.targets[ctx.target])
     out: list[dict[str, Any]] = []
     repeats = effective_repeats(cfg)
+    base_seed = int(cfg["runtime"]["seed"])
     import json
 
     best_by_fold: dict[tuple[int, int], dict[str, Any]] = {}
@@ -105,22 +124,48 @@ def fit_fold_models(
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
+    tasks: list[tuple[int, int, np.ndarray, np.ndarray, dict]] = []
     for r in range(repeats):
-        outer = make_outer_splits(ds, cfg, int(cfg["runtime"]["seed"]) + r * 1000)
+        outer = make_outer_splits(ds, cfg, base_seed + r * 1000)
         for k, (tr, te) in enumerate(outer):
-            params = best_by_fold.get((r, k), {})
-            pipe = build_pipeline(spec, cfg, ds.feature_names,
-                                  seed=(int(cfg["runtime"]["seed"]) + r * 1000) * 100 + k)
-            clean = {kk: vv for kk, vv in params.items()
-                     if kk.startswith(("model__", "prep__", "scale__"))}
-            if clean:
-                try:
-                    pipe.set_params(**clean)
-                except ValueError:
-                    pass
-            pipe.fit(ds.X[tr], y[tr])
-            out.append({"repeat": r, "fold": k, "tr": tr, "te": te,
-                        "model": pipe, "params": params})
+            tasks.append((r, k, tr, te, best_by_fold.get((r, k), {})))
+
+    jobs = resolve_workers(n_jobs)
+    if jobs <= 1 or len(tasks) < 2:
+        fitted = [
+            _fit_fold_job(ds.X, y, tr, ds.feature_names, cfg, spec, params,
+                          (base_seed + r * 1000) * 100 + k)
+            for r, k, tr, _te, params in tasks
+        ]
+    else:
+        # 先串行拟合第一个折，实测单折成本；折模型动辄几百 ms，通常值得并行，
+        # 但 pls/ridge 这种毫秒级模型上并行只会更慢。
+        t0 = time.perf_counter()
+        r0, k0, tr0, _te0, params0 = tasks[0]
+        first = _fit_fold_job(ds.X, y, tr0, ds.feature_names, cfg, spec, params0,
+                              (base_seed + r0 * 1000) * 100 + k0)
+        per_task = time.perf_counter() - t0
+        if not parallel_pays_off(len(tasks) - 1, per_task, jobs):
+            fitted = [first] + [
+                _fit_fold_job(ds.X, y, tr, ds.feature_names, cfg, spec, params,
+                              (base_seed + r * 1000) * 100 + k)
+                for r, k, tr, _te, params in tasks[1:]
+            ]
+        else:
+            from joblib import Parallel, delayed
+
+            info(f"为可解释性并行重拟合 {len(tasks) - 1} 个折模型"
+                 f"（{spec.name}，n_jobs={jobs} 进程，单折 {per_task * 1000:.0f} ms）")
+            rest = Parallel(n_jobs=jobs)(
+                delayed(_fit_fold_job)(ds.X, y, tr, ds.feature_names, cfg, spec, params,
+                                       (base_seed + r * 1000) * 100 + k)
+                for r, k, tr, _te, params in tasks[1:]
+            )
+            fitted = [first] + list(rest)
+
+    for (r, k, tr, te, params), pipe in zip(tasks, fitted):
+        out.append({"repeat": r, "fold": k, "tr": tr, "te": te,
+                    "model": pipe, "params": params})
     info(f"为可解释性重拟合 {len(out)} 个折模型（{spec.name}）")
     return out
 
@@ -144,6 +189,91 @@ def _predict_score(pipe, X: np.ndarray, task: str) -> tuple[np.ndarray, str]:
     return np.asarray(pipe.predict(X)), "none"
 
 
+def _fold_score(task: str, n_classes: int, fold_models: list[dict[str, Any]], y: np.ndarray,
+                preds: dict[tuple[int, int], np.ndarray],
+                kinds: dict[tuple[int, int], str]) -> float:
+    """按 fold_models 顺序拼接逐折预测后算指标（串行/并行共用）。"""
+    from .metrics import classification_metrics, regression_metrics
+
+    truth, est, ks = [], [], []
+    for fm in fold_models:
+        key = (fm["repeat"], fm["fold"])
+        if key not in preds:
+            continue
+        truth.append(y[fm["te"]])
+        est.append(preds[key])
+        ks.append(kinds.get(key, "native"))
+    if not truth:
+        return float("nan")
+    yt, yp = np.concatenate(truth), np.concatenate(est)
+    if task == "regression":
+        return float(regression_metrics(yt, yp)["r2"])
+    proba_kind = "native" if all(k == "native" for k in ks) else (
+        "decision" if all(k in ("native", "decision") for k in ks) else "none")
+    return float(classification_metrics(yt, yp, n_classes=n_classes,
+                                        proba_kind=proba_kind)["auc"])
+
+
+def _avg_all_pred(task: str, fold_models: list[dict[str, Any]], Xmat: np.ndarray) -> np.ndarray:
+    cols = []
+    for fm in fold_models:
+        p, _kind = _predict_score(fm["model"], Xmat, task)
+        p = np.asarray(p, dtype=float)
+        if p.ndim == 2:
+            p = p[:, -1]
+        cols.append(p)
+    return np.mean(np.vstack(cols), axis=0)
+
+
+def _score_all_rows(task: str, n_classes: int, y: np.ndarray, pred: np.ndarray) -> float:
+    from .metrics import classification_metrics, regression_metrics
+
+    if task == "regression":
+        return float(regression_metrics(y, pred)["r2"])
+    return float(classification_metrics(y, pred, n_classes=n_classes,
+                                        proba_kind="native")["auc"])
+
+
+def _band_one_delta(band_indices, perms: list[np.ndarray], X: np.ndarray, y: np.ndarray,
+                    task: str, n_classes: int, fold_models: list[dict[str, Any]],
+                    all_rows: bool, base_score: float) -> float:
+    """一个 (波段 × 重复) 任务的 Δ指标。串行与并行 worker 调同一段代码。"""
+    idx = np.asarray(band_indices, dtype=int)
+    if all_rows:
+        Xp = X.copy()
+        perm = perms[0]
+        Xp[:, idx] = Xp[perm][:, idx]
+        s = _score_all_rows(task, n_classes, y, _avg_all_pred(task, fold_models, Xp))
+        return float(base_score - s) if np.isfinite(s) else float("nan")
+    preds: dict[tuple[int, int], np.ndarray] = {}
+    kinds: dict[tuple[int, int], str] = {}
+    for fm, perm in zip(fold_models, perms):
+        Xte = X[fm["te"]].copy()
+        Xte[:, idx] = Xte[perm][:, idx]
+        key = (fm["repeat"], fm["fold"])
+        preds[key], kinds[key] = _predict_score(fm["model"], Xte, task)
+    s = _fold_score(task, n_classes, fold_models, y, preds, kinds)
+    return float(base_score - s) if np.isfinite(s) else float("nan")
+
+
+# 多进程并行时每个 worker 只初始化一次的状态（X / 折模型等，避免逐任务 pickle 模型）
+_INTERP_STATE: dict[str, Any] = {}
+
+
+def _interp_worker_init(X, y, task, n_classes, fold_models, all_rows, base_score) -> None:
+    _INTERP_STATE.clear()
+    _INTERP_STATE.update(X=X, y=y, task=task, n_classes=n_classes,
+                         fold_models=fold_models, all_rows=all_rows, base_score=base_score)
+
+
+def _interp_band_task(band_indices, perms) -> float:
+    try:
+        return _band_one_delta(band_indices, perms, **_INTERP_STATE)
+    except Exception as exc:  # noqa: BLE001
+        warn(f"波段置换失败：{type(exc).__name__}: {exc}")
+        return float("nan")
+
+
 def band_permutation_importance(
     ctx,
     fold_models: list[dict[str, Any]],
@@ -151,6 +281,7 @@ def band_permutation_importance(
     n_repeats: int = 10,
     seed: int = 0,
     max_bands: int = MAX_BANDS,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """波段级置换重要性：把整段波长同时打乱，衡量 OOF 指标的下降。"""
     from .metrics import classification_metrics, regression_metrics
@@ -199,48 +330,76 @@ def band_permutation_importance(
     min_test = min((len(fm["te"]) for fm in fold_models), default=0)
     all_rows = min_test < 2
 
-    def _avg_pred(Xmat: np.ndarray) -> np.ndarray:
-        cols = []
-        for fm in fold_models:
-            p, _kind = _predict_score(fm["model"], Xmat, task)
-            p = np.asarray(p, dtype=float)
-            if p.ndim == 2:
-                p = p[:, -1]
-            cols.append(p)
-        return np.mean(np.vstack(cols), axis=0)
-
-    def _score_all(pred: np.ndarray) -> float:
-        if task == "regression":
-            return float(regression_metrics(y, pred)["r2"])
-        return float(classification_metrics(y, pred, n_classes=n_classes,
-                                            proba_kind="native")["auc"])
-
     if all_rows:
         warn("每折测试样品 < 2（如留一法），列置换在单行上是恒等操作："
              "改用全样本置换，ΔR² 含内样本偏差，仅用于特征排序")
-        base_score = _score_all(_avg_pred(X))
+        base_score = _score_all_rows(task, n_classes, y, _avg_all_pred(task, fold_models, X))
+
+    # 置换索引必须**在主进程按原来的 rng 调用顺序**生成：worker 只拿"某个波段某次
+    # 重复要用的索引"，所以抽签序列与串行实现逐位相同，并行只改调度。
+    jobs = resolve_workers(n_jobs)
+    n_rep = int(n_repeats)
+
+    def _perm_stream():
+        for gi, _grp in enumerate(pairs):
+            for _rep in range(n_rep):
+                if all_rows:
+                    yield gi, [rng.permutation(X.shape[0])]
+                else:
+                    yield gi, [rng.permutation(len(fm["te"])) for fm in fold_models]
+
+    deltas_by_band: list[list[float]] = [[] for _ in pairs]
+    stream = _perm_stream()
+    total_items = len(pairs) * n_rep
+
+    def _consume_serial(n_items: int) -> None:
+        for _ in range(n_items):
+            gi, perms = next(stream)
+            d = _band_one_delta(pairs[gi]["indices"], perms, X, y, task, n_classes,
+                                fold_models, all_rows, base_score)
+            if np.isfinite(d):
+                deltas_by_band[gi].append(d)
+            if (gi + 1) % 25 == 0:
+                info(f"  波段置换 {gi + 1}/{len(pairs)}")
+
+    if jobs <= 1 or n_rep <= 1:
+        _consume_serial(total_items)
+    else:
+        # 先串行跑第 0 个波段（全部重复）当热身，实测单个任务要多久；
+        # 小数据上并行启动成本（≈3–6s）会超过全部计算，这时必须留在串行。
+        t0 = time.perf_counter()
+        _consume_serial(n_rep)
+        per_task = (time.perf_counter() - t0) / max(1, n_rep)
+        rest = (len(pairs) - 1) * n_rep
+        if not parallel_pays_off(rest, per_task, jobs):
+            info(f"  波段置换串行：预估剩余 {human_duration(per_task * rest)}，"
+                 f"并行启动成本摊不平（单任务 {per_task * 1000:.0f} ms）")
+            _consume_serial(rest)
+        else:
+            from joblib import Parallel, delayed
+
+            info(f"  波段置换并行：n_jobs={jobs}（进程），剩余 {rest} 个任务"
+                 f"（单任务实测 {per_task * 1000:.0f} ms）")
+
+            def _tasks():
+                for _ in range(rest):
+                    gi, perms = next(stream)
+                    yield delayed(_interp_band_task)(pairs[gi]["indices"], perms)
+
+            # 任务 = 一个 (波段 × 重复)，折模型通过 initializer 每个 worker 只传一次
+            out = Parallel(n_jobs=jobs, initializer=_interp_worker_init,
+                           initargs=(X, y, task, n_classes, fold_models, all_rows,
+                                     base_score))(_tasks())
+            seq = [(gi, rep) for gi in range(1, len(pairs)) for rep in range(n_rep)]
+            step = max(1, len(out) // 5)
+            for done, ((gi, _rep), d) in enumerate(zip(seq, out), start=1):
+                if np.isfinite(d):
+                    deltas_by_band[gi].append(d)
+                if done % step == 0:
+                    info(f"  波段置换 {done}/{len(out)} 个任务")
+
     for gi, grp in enumerate(pairs):
-        deltas: list[float] = []
-        idx = np.asarray(grp["indices"], dtype=int)
-        for _ in range(int(n_repeats)):
-            if all_rows:
-                Xp = X.copy()
-                perm = rng.permutation(Xp.shape[0])
-                Xp[:, idx] = Xp[perm][:, idx]
-                s = _score_all(_avg_pred(Xp))
-                if np.isfinite(s):
-                    deltas.append(base_score - s)
-                continue
-            preds, kinds = {}, {}
-            for fm in fold_models:
-                Xte = X[fm["te"]].copy()
-                perm = rng.permutation(Xte.shape[0])
-                Xte[:, idx] = Xte[perm][:, idx]
-                key = (fm["repeat"], fm["fold"])
-                preds[key], kinds[key] = _predict_score(fm["model"], Xte, task)
-            s = score(preds, kinds)
-            if np.isfinite(s):
-                deltas.append(base_score - s)
+        deltas = deltas_by_band[gi]
         if not deltas:
             continue
         rows.append({
@@ -295,6 +454,14 @@ def vip_scores(X: np.ndarray, y: np.ndarray, n_components: int, scale: bool = Fa
     wn = w / np.maximum(np.linalg.norm(w, axis=0, keepdims=True), 1e-12)
     vip = np.sqrt(p * ((wn ** 2) @ ss) / np.sum(ss))
     return np.asarray(vip, dtype=float)
+
+
+def _vip_boot_job(Xdiag: np.ndarray, y_vec: np.ndarray, idx: np.ndarray, k: int):
+    """一次按样品重采样的 VIP（失败返回 None，与串行路径一致地跳过）。"""
+    try:
+        return vip_scores(Xdiag[idx], y_vec[idx], k)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def coef_stability(

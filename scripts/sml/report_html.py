@@ -133,7 +133,8 @@ a{color:inherit;text-decoration:none}
 _COL_ZH = {
     "model": "模型", "target": "目标", "prep_mix": "逐折选中的预处理",
     "metric_basis": "口径", "n_folds_ok": "有效折数", "n_folds_degenerate": "退化折数",
-    "rank": "排名", "rmse_gap_to_best": "与最优的 RMSE 差", "n_repeats": "重复次数",
+    "rank": "排名", "r2_gap_to_best": "与最优的 R² 差（排名口径）",
+    "rmse_gap_to_best": "与最优的 RMSE 差", "n_repeats": "重复次数",
     "n_oof_rows": "OOF 行数", "prep": "预处理", "status": "状态", "best_params": "最优超参",
     "method": "方法", "key": "标识", "flagged": "越界样品数", "rate": "越界样品比例",
     "flagged_rows": "越界 OOF 行数", "threshold": "阈值",
@@ -497,7 +498,9 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     if badges:
         body.append(f"<p>{_badges(badges)}</p>")
     if perm and not perm.get("error") and perm.get("conclusion"):
-        body.append(f"<p><b>抗噪声检验</b>：{_md_inline(perm.get('conclusion'))}</p>")
+        _basis = ("（观测值为池化折外 OOF 口径）"
+                  if str(perm.get("metric")) in ("r2", "rmse", "mae") else "")
+        body.append(f"<p><b>抗噪声检验</b>{_basis}：{_md_inline(perm.get('conclusion'))}</p>")
     if ad_eval and ad_eval.get("conclusion"):
         body.append(f"<p><b>适用域</b>：{_md_inline(ad_eval.get('conclusion'))}</p>")
     sections.append(("summary", "".join(body)))
@@ -533,12 +536,17 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     # 三、验证方案
     sp = cfg["split"]
     plan = read_json(run / "cv/cv_summary.json") if (run / "cv/cv_summary.json").exists() else {}
+    # 折数与重复次数取 cv 的**实际执行值**；缺 cv_summary 时才退回配置原值
+    # （loo_batch 下配置的 5 折/5 次重复与实际不符）。
+    n_out = plan.get("n_outer_folds") or sp["outer"]["n_splits"]
+    n_rep = plan.get("effective_repeats") or sp["repeats"]
     rows = [
         ("策略", f"<code>{_esc(sp['strategy'])}</code>"),
         ("分组键", f"<code>{_esc(cfg['data'].get('id_col') or '特征指纹推断')}</code>"),
-        ("外层", f"{sp['outer']['n_splits']} 折分组 CV × 重复 {sp['repeats']} 次"),
+        ("外层", f"{n_out} 折分组 CV × 重复 {n_rep} 次"),
         ("内层", f"{sp['inner']['n_splits']} 折分组 CV（调参 + 预处理选择）"),
-        ("总拟合次数", _esc(plan.get("total_fit_calls", "—"))),
+        ("总拟合次数", _esc(plan.get("total_fit_calls", "—"))
+         + "（内层搜索 + 每折最终重拟合，不含置换检验）"),
     ]
     sections.append(("design", _kv(rows) + "<p class=\"note\">预处理链作为超参数逐折选择，"
                      "测试折不参与任何拟合——这是本管线与「先全量预处理再切分」的关键区别。</p>"))

@@ -27,7 +27,12 @@ __all__ = [
     "bonferroni", "wilcoxon_repeats", "PRIMARY_METRIC",
 ]
 
-PRIMARY_METRIC = {"regression": "rmse", "classification": "auc"}
+#: 「主指标」必须与选模同一把尺子（``selection.PRIMARY_BY_TASK``）：回归 R²、分类 AUC。
+#: 旧值是回归 ``rmse``，于是 ``comparison.csv`` 的 ``metric_primary=True`` 标在 RMSE 行上，
+#: 而选模与显著性检验用的是 R²——按下标筛「主指标」的人会拿 RMSE 判差异（真实数据上
+#: 出现过 pls 与 rf 的 RMSE 与 R² 排序方向不同）。RMSE 仍会被强制纳入比对表，
+#: 只是不再冒充主指标。
+PRIMARY_METRIC = {"regression": "r2", "classification": "auc"}
 
 
 def _side_frame(merged: pd.DataFrame, suffix: str) -> pd.DataFrame:
@@ -293,20 +298,34 @@ def compare_models(
 
 
 def rank_models(summary: pd.DataFrame, task: str) -> pd.DataFrame:
-    """按主指标排名（**目标内排名**，附与同目标最优模型的差值）。
+    """按**选模用的同一个指标**排名（目标内），附与同目标最优模型的差值。
 
     多目标时 ``metrics_summary`` 是多个 target 纵向拼接的表，若直接
     ``df[col].rank()`` 就是拿不同目标的误差绝对值互相比：量纲不同（含量 vs 水分）、
     难度不同，排名与 ``gap_to_best`` 都会指向"跨目标最强的那个"。
     每个 target 有自己的尺度，只能在 target 内部比。
+
+    指标必须与 ``_best_by_primary`` / ``pick_best_model`` 一致：回归用 R²，
+    分类用 AUC。早先这里用 RMSE 排名、选模却用 R²，两者在"逐折 R² 差别大但 RMSE
+    接近"的数据上会给出不同的第一名（真实数据上出现过 KNN 的折均值 R² 为负、却因
+    RMSE 最小被 rank 成第 1，与报告写的「最优模型 XGB」直接打架）。
     """
     if summary.empty:
         return summary
-    metric = PRIMARY_METRIC.get(task, "rmse")
-    col = f"{metric}_mean"
+    base_metric = "r2" if task == "regression" else "auc"
+    col = f"{base_metric}_mean"
     if col not in summary.columns:
-        return summary
-    lower_better = metric in {"rmse", "mae", "brier", "log_loss", "ece"}
+        # 兜底：连选模指标都没有时，退回一个**确实存在**的误差指标（并如实按它排名）。
+        # 不要再退回 PRIMARY_METRIC——它就是刚被判定缺失的那个。
+        for _cand in (("mae", "rmse", "bias") if task == "regression"
+                      else ("balanced_accuracy", "f1_macro")):
+            if f"{_cand}_mean" in summary.columns:
+                base_metric = _cand
+                break
+        col = f"{base_metric}_mean"
+        if col not in summary.columns:
+            return summary
+    lower_better = base_metric in {"rmse", "mae", "brier", "log_loss", "ece"}
     df = summary.copy()
 
     # 口径：stage_cv 与 rebuild_tables 都会在「有效折 < MIN_OK_FOLDS」时把这些行标成
@@ -314,10 +333,10 @@ def rank_models(summary: pd.DataFrame, task: str) -> pd.DataFrame:
     # 此时 *_mean 只是极少数折的平均（退化折被 nanmean 跳过），不能用于排名，
     # 改用无后缀的池化列（由 oof_group_metrics 计算）。缺列时退回 fold 口径。
     basis = df["metric_basis"].astype(str) if "metric_basis" in df.columns else pd.Series("fold", index=df.index)
-    use_pooled = basis.eq("pooled") & df[metric].notna() if metric in df.columns else pd.Series(False, index=df.index)
+    use_pooled = (basis.eq("pooled") & df[base_metric].notna()) if base_metric in df.columns else pd.Series(False, index=df.index)
     score = df[col].astype(float).copy()
-    if metric in df.columns:
-        score = score.where(~use_pooled, df[metric].astype(float))
+    if base_metric in df.columns:
+        score = score.where(~use_pooled, df[base_metric].astype(float))
     df["_rank_score"] = score
 
     multi = "target" in df.columns and df["target"].nunique(dropna=False) > 1
@@ -328,7 +347,7 @@ def rank_models(summary: pd.DataFrame, task: str) -> pd.DataFrame:
     else:
         df["rank"] = df["_rank_score"].rank(ascending=lower_better, method="min")
         best = df["_rank_score"].min() if lower_better else df["_rank_score"].max()
-    df[f"{metric}_gap_to_best"] = (df["_rank_score"] - best) * (1 if lower_better else -1)
+    df[f"{base_metric}_gap_to_best"] = (df["_rank_score"] - best) * (1 if lower_better else -1)
     df = df.drop(columns="_rank_score")
     sort_keys = ["target", "rank"] if multi else ["rank"]
     return df.sort_values(sort_keys, kind="stable")

@@ -250,7 +250,7 @@ $PY scripts/run_pipeline.py --config ... --out D:/runs/nir_v1 --no-fanout --stag
 
 ### 内存暴涨 / 机器卡死
 
-1. 外层串行、内层并行是设计约束，不要自己套 `n_jobs=-1` 两层
+1. 并行只发生在独立任务级（候选 / 折 / 置换 / 波段），不要再在外层自己套一层 `n_jobs=-1`
 2. `--n-jobs 2`
 3. `permutation.n_perm`、`evaluation.bootstrap.n` 减半
 4. 光谱 5000 点以上时考虑 `preprocess` 里加 `band` 裁剪

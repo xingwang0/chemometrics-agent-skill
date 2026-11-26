@@ -22,7 +22,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sml.compare import rank_models, compare_models  # noqa: E402
-from sml.cv import effective_repeats, oof_group_metrics, run_nested_cv  # noqa: E402
+from sml.cv import (_outer_fold_count, effective_repeats, oof_group_metrics,  # noqa: E402
+                    run_nested_cv)
 from sml.metrics import (  # noqa: E402
     PRED_RANGE_FACTOR, aggregate_repeats, bootstrap_classification, bootstrap_regression,
     describe_pooled_rows, mark_metric_basis, oof_score_matrix,
@@ -305,6 +306,10 @@ def run_cv(ctx) -> dict:
         "models": [s.name for s in specs],
         "n_oof_rows": int(len(oof)),
         "n_folds": int(len(folds)),
+        # 实际折数/重复次数：报告层直接引用这两个值，避免 loo_batch 下把
+        # 「按批次数折」写成「5 折」、把降级后的 1 次重复写成 repeats=5 次。
+        "n_outer_folds": int(_outer_fold_count(ds, cfg)),
+        "effective_repeats": int(effective_repeats(cfg)),
         "n_failed": int(failed.sum()),
         "failed_models": fail_info,
         "prediction_range_flags": range_flags,

@@ -39,6 +39,8 @@ __all__ = [
     "timed",
     "available_memory_gb",
     "mem_guard",
+    "resolve_workers",
+    "parallel_pays_off",
     "non_ascii",
     "configure_matplotlib",
     "suppress_warnings",
@@ -277,6 +279,63 @@ def mem_guard(need_gb: float, label: str = "任务"):
             f" 请降低 repeats / n_iter / bootstrap 次数，或改用 --budget fast。"
         )
     yield avail
+
+
+# --------------------------------------------------------------------------- #
+# 并行度
+# --------------------------------------------------------------------------- #
+# 异构核（Intel P+E、Apple P+E）上 worker 数不等于核数：E 核单核吞吐只有 P 核的
+# 六成左右，把 worker 开满会把长任务派到慢核上，墙钟反而变长。
+# 实测（一台 14 核异构大小核机器，240 个 xgb 拟合任务）：
+#   n_jobs=4 → 3.0x，6 → 3.5x，8 → 3.4~5.3x，9 → 4.2x，10 → 4.4x，12 → 4.1x，14 → 3.5x
+# 因此 n_jobs=-1 时按 0.7×核数给 worker（14 核 → 10），而不是等于核数。
+HETERO_WORKER_RATIO = 0.7
+MAX_AUTO_WORKERS = 24
+
+
+def resolve_workers(n_jobs: int | None = None) -> int:
+    """把 ``runtime.n_jobs`` 解析成实际 worker 数（进程级并行用）。
+
+    * ``None`` / ``-1``：自动，取 ``round(0.7 × 核数)``，上限 24（异构核按 P 核算）。
+    * ``0``：也当自动（旧配置里 0 是"未指定"的常见写法）。
+    * 正整数：原样使用，但不超过核数（超订只会互相抢核）。
+
+    只影响"几个 worker"，不影响任何随机数或计算顺序——每个 worker 内部的拟合与
+    主进程串行执行时逐位相同，因此结果不受并行度影响。
+    """
+    cpu = os.cpu_count() or 1
+    if n_jobs is None:
+        n_jobs = -1
+    n = int(n_jobs)
+    if n <= 0:
+        # 核数很少时不要因为 ×0.7 掉到 1：4 核给 3，2 核给 2
+        auto = max(2, int(round(cpu * HETERO_WORKER_RATIO))) if cpu > 2 else cpu
+        return max(1, min(auto, cpu, MAX_AUTO_WORKERS))
+    return max(1, min(n, cpu))
+
+
+def parallel_pays_off(n_tasks: int, seconds_per_task: float, workers: int,
+                      startup_seconds: float = 3.0, per_worker_seconds: float = 0.7) -> bool:
+    """判断把 ``n_tasks`` 个任务交给 ``workers`` 个进程是否真的更快。
+
+    为什么需要这个判断：本机实测 loky 起 10 个 worker 的固定成本约 2.4s，
+    initializer 里带大数组时到 6s 以上。smoke 这种"整个 run 只要 7 秒"的数据上，
+    无脑并行会让 perm 从 0.2s 变成 22s。所以各 stage 都先串行跑**一个**任务计时，
+    再用这个函数决定剩下的是并行还是继续串行。
+    """
+    import math
+
+    if workers <= 1 or n_tasks < 2:
+        return False
+    try:
+        per = float(seconds_per_task)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(per) or per <= 0:
+        return False
+    serial = n_tasks * per
+    par = serial / workers + startup_seconds + per_worker_seconds * workers
+    return par < 0.9 * serial
 
 
 def non_ascii(text: str) -> bool:

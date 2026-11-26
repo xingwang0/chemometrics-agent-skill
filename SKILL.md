@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "科研级机器学习预测建模流程（材料/化学/光谱为主）。当用户要做近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，或配方/工艺参数等表格数据的回归与分类预测；要写论文 Methods、画预测散点/Williams plot/校准曲线；要算 RPD、VIP、适用域、Y-randomization 置换检验；要回答审稿人关于交叉验证、数据泄漏、过拟合、重复测量、批次效应的质疑时使用。内置分组交叉验证 + 嵌套调参 + 重复 CV + 置换检验 + 按组 bootstrap 置信区间 + 适用域四法 + 审稿质疑清单。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.2.1"
+version: "1.2.5"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
@@ -21,8 +21,21 @@ agent_created: true
 
 | 变更 | 影响 | 处理 |
 |---|---|---|
+| **AD 结论在 Methods 里取「第一个模型」（1.2.5）** | 各模型判定不一致时，Methods/limitations 会与正文矛盾——真实数据上出现过正文写「1/5 有效」、Methods 写「无显著差异」，作者照抄 Methods 就丢掉了唯一有效的那条 | 用 `--stages ad,report` 重出；正文、Methods、limitations、审稿清单现在统一用汇总口径 |
+| **旧 `ad_model.joblib` 现在直接报错（1.2.5）** | 缺训练参考集的旧模型会让 `predict.py` 报 `E-PRED-006`，不再静默输出「全判域外」却看起来正常的预测 | 用 `--stages ad,report` 重建；只想预测不判域就加 `--no-ad` |
+| **多目标 run 末行给出总耗时（1.2.5）** | 以前只逐目标打印，容易把最后一个目标的时间当成整次运行 | 无需操作 |
+| **`comparison.csv` 的 `metric_primary` 改标在 R² 行（1.2.5）** | 回归的主指标从 RMSE 改为 R²，与选模同一把尺子；数值不变 | 按 `metric_primary` 筛主指标的下游脚本行为会变 |
+| **新样品判域修复（1.2.4，重要）** | `ADModel.score()` 曾用**待判样品自己**当杠杆参考集，单行打分恒得 h=2.0 → `predict.py` 把几乎所有新样品判为域外。现改为用训练得分矩阵作参考集 | **旧 run 必须重跑 `--stages ad,report`** 才会生成新的 `ad_model.joblib`（`--retrain` 只重建最终模型）；`ad_scores.csv`（自打分）数值不变 |
+| **`permutation.mode=full` 改为显式拒绝（1.2.4）** | 旧版接受 full、实际跑 fast，却把 full 写进 `permutation.json`，报告会写出「每轮重搜超参」这句没执行过的协议 | 现在报 `E-CFG-045`；`permutation.json` 只记录实际执行的 `mode=fast` |
+| **列表字段类型校验（1.2.4）** | `--set data.drop_cols=time` 曾把列表降级成字符串，`roles.update(str)` 按字符拆开 → 该列照旧进特征矩阵（静默泄漏） | 现在报 `E-CFG-046`，并提示用 `--set-remove` 或 JSON 列表 |
+| **AD 有效性检验改按样品（1.2.4）** | 旧版在 OOF 行上做 Mann-Whitney，6 行（=1 个样品）即可"显著有效"；现在按样品平均绝对误差检验，行口径另存 `row_mannwhitney_p_greater` 备查 | `ad_eval.json` 的 p 值会变（幅度收敛），结论更保守 |
+| **AD 有效性检验方向（1.2.2）** | 检验方向写反，`effective` 分支不可达，T5 的「AD 是否有效」恒为"否" | 用 `--stages ad,report` 重出；`ad_flag` / `ad_majority` 不变 |
+| **排名与选模同口径（1.2.2）** | `rank` 与 `r2_gap_to_best` 改用选模主指标（回归 R²、分类 AUC），不再按池化 RMSE | 读 `rmse_gap_to_best` 的下游脚本需改名 |
+| **md 表头带单位（1.2.2）** | `report.md` 的 RMSE/MAE 列头带 `data.target_unit`；ΔR² 不再误挂「单位未指定」 | 建议都填 `data.target_unit` |
+| **「最优模型」需显著性（1.2.2）** | 未过 BH 显著性时改称「排序第一的模型」，不再出现无依据的"最优" | 无需操作 |
+| **dry-run 不落 cwd（1.2.2）** | 不传 `--out` 时写系统临时目录；stage 列表按 `enabled` 过滤；估时改区间 | 无需操作 |
 | **新增 `report/report.html`** | 单文件响应式报告，CSS 全内联、零外链零 JS，断网/邮件附件可原样打开；`report.md` 仍在 | 无需操作；`report.html: false` 可关闭 |
-| **自检 34 → 53 项** | 新增 `present` 10、`figure_qc` 5、`standards` 2、`reporting` 杠杆口径 2 | 换机先跑 `selfcheck.py`，53/53 再动数据 |
+| **自检 34 → 55 项** | 新增 `present` 10、`figure_qc` 5、`standards` 2、`reporting` 口径 4（1.2.4 加「杠杆参考集」，1.2.5 加「AD 汇总结论」） | 换机先跑 `selfcheck.py`，55/55 再动数据 |
 | **显示层收口到 `sml/present.py`** | 精度按字段裁决（R² 3 位、RPD 2 位、RMSE 4 位有效数字）；比例统一为百分数；`-0.000` 结构上不可能出现 | 只影响文字，`tables/*.csv` 与 `tables.xlsx` 的单元格值仍是未舍入 float |
 | **p 值 4 位改 3 位**，`p<0.001` / `p>0.999` 用不等号 | 置换检验的 p 有硬下限 `1/(1+n_perm)`，写 `0.0000` 是错的 | 无需操作 |
 | **图内轴标签带单位** | 需配 `data.target_unit`（如 `"%"`、`"mg/kg"`）；不填则写「单位未指定」并挂 blocking 徽标，**不再静默省略量纲** | 建议都填上 |
@@ -61,7 +74,7 @@ agent_created: true
 **换机或换人**：把上面两行换成你自己的解释器与技能根，然后**先跑自检**再谈建模：
 
 ```bash
-python scripts/selfcheck.py          # 53 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性、展示规格、图件完整性
+python scripts/selfcheck.py          # 55 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性、展示规格、图件完整性
 ```
 
 自检会逐项告诉你缺哪个包、版本差在哪、哪条 API 已移除，不需要猜。全绿之后才可能跑出可信数字。
@@ -86,7 +99,7 @@ Python 3.14.7 + sklearn 1.9.1 + xgboost/lightgbm/catboost + shap + matplotlib。
 PY="python"
 ROOT="/path/to/research-ml-modeling"
 
-# 1) 环境自检（首次/换机必跑，53 项）
+# 1) 环境自检（首次/换机必跑，55 项）
 $PY "$ROOT/scripts/selfcheck.py"
 
 # 2) 预演：只审计 + 报"要拟合多少次、大概多久"，不训练
@@ -264,7 +277,9 @@ runs/<id>/
 `report` 阶段会直接拒绝（`E-STAGE-004`）而不是给出错数字。
 
 **聚合口径**：`metrics_summary.csv` 按 **(target, model)** 聚合，`rank` 与 `gap_to_best`
-都在**目标内**计算；`prep_mix` 列记录该模型在各折里分别选中了哪条预处理链。
+都在**目标内**计算，且用的是**与选模相同的主指标**（回归 R²、分类 AUC，列名
+`r2_gap_to_best`）；早先 rank 按池化 RMSE 排、选模按折均值 R²，会出现
+"rank=1 的模型不是报告里那个最优模型"。`prep_mix` 列记录该模型在各折里分别选中了哪条预处理链。
 **不要**按"模型×预处理"拆分排名——预处理是逐折内部选出的超参，
 拆开排名等于在几十个组合里挑最优（winner's curse）。细分结果另存 `metrics_by_prep.csv`。
 

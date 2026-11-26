@@ -219,7 +219,7 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 |---|---|---|
 | `enabled` | true | Y-randomization 开关 |
 | `n_perm` | 200 | 置换次数；n_perm=200 时最小可达 p=1/201≈0.005 |
-| `mode` | `fast` | `fast`（固定超参，便宜）/ `full`（重跑嵌套，贵） |
+| `mode` | `fast` | 只有 `fast`（固定超参）已实现；`full`（每轮重跑嵌套）**未实现**，写入会报 `E-CFG-045` |
 | `alpha` | 0.05 | 判定阈值 |
 
 ---
@@ -272,7 +272,7 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `n_jobs` | -1 | 内层并行进程数 |
+| `n_jobs` | -1 | 并行进程数；`-1` 按 `round(0.7×核数)` 给（异构 P/E 核上开满反而更慢），显式正整数原样使用 |
 | `seed` | 42 | 主种子（派生规则见 `provenance.py`） |
 | `mem_guard_gb` | 0 | >0 时启动前检查可用内存，不足直接报错（比跑到半夜 OOM 好） |
 | `save_models` | `last` | `none` / `last`（每 repeat 最后一折）/ `all` |
@@ -316,8 +316,11 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 | `E-PRED-002` | 新样品表缺训练特征（会列出前 10 个缺失列名） |
 | `E-PRED-003` | `predict.py` 既没给 `--data` 也没给 `--retrain` |
 | `E-PRED-004` | run 目录下没有 `config.resolved.json`，无法重建最终模型 |
+| `E-PRED-006` | `ad/ad_model.joblib` 由 ≤1.2.3 生成（缺训练参考集），判域不可信。用 `--stages ad,report` 重建，或加 `--no-ad` 跳过判域 |
 | `E-CFG-043` | `data.target_unit` 类型错（须字符串或 `{目标: 单位}`），或字典里缺某些目标的单位 |
 | `E-CFG-044` | `report.precision_profile` 取值不是 `paper` / `compact` |
+| `E-CFG-045` | `permutation.mode=full`（未实现）或取值非法。full 会让报告写出「每轮重搜超参」这句没执行过的协议，故直接拒绝 |
+| `E-CFG-046` | 列表字段被降级成标量（`--set data.drop_cols=time` 等）。字符串会被 `roles.update()` 按**字符**拆开，等于没删 → 目标泄漏。改用 `--set-remove` 或 JSON 列表 |
 
 ---
 

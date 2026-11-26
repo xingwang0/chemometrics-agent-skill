@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import numpy as np
@@ -28,7 +29,8 @@ import pandas as pd
 from .cv import effective_repeats, make_outer_splits
 from .metrics import METRIC_LABELS
 from .models import ModelSpec, build_pipeline
-from .utils import info, warn
+from .present import fmt_p
+from .utils import human_duration, info, warn
 
 __all__ = ["permute_y_sample_level", "y_randomization", "summarize_permutation"]
 
@@ -147,14 +149,43 @@ def _fit_predict_fold(cfg, spec: ModelSpec, X, y, tr, te, params: dict | None, s
 
 
 def _effective_jobs(n_jobs: int | None) -> int:
-    """把 ``-1`` 解析成实际核数；上限 16，避免线程/BLAS 过度订阅。"""
-    cpu = os.cpu_count() or 1
-    if n_jobs is None:
-        return 1
-    n = int(n_jobs)
-    if n < 0:
-        n = cpu
-    return max(1, min(n, cpu, 16))
+    """把 ``runtime.n_jobs`` 解析成 worker 数（见 ``utils.resolve_workers``）。
+
+    旧实现把 ``-1`` 解析成核数并硬性封顶 16。实测一台 14 核异构大小核机器上把 worker
+    开满反而不如八成：E 核单核吞吐只有 P 核的六成，长任务派到慢核上拖尾。
+    """
+    from .utils import resolve_workers
+
+    return resolve_workers(n_jobs)
+
+
+# 多进程并行时 worker 只初始化一次的状态（X / 配置 / 模型规格）。
+# 放在模块级 + initializer 里传：每个 worker 只 pickle 一次，而不是每个任务一次。
+_PERM_STATE: dict[str, Any] = {}
+
+
+def _perm_worker_init(X, cfg, spec, params, task) -> None:
+    _PERM_STATE.clear()
+    _PERM_STATE.update(X=X, cfg=cfg, spec=spec, params=params, task=task)
+
+
+def _perm_fold_task(y_use: np.ndarray, tr: np.ndarray, te: np.ndarray, seed: int,
+                    X_tr_prepped, X_te_prepped) -> tuple[np.ndarray | None, str, str | None]:
+    """一次置换的一折：拟合 + 预测，返回 ``(分数, 概率能力, 错误信息)``。
+
+    与主进程串行路径调用**同一个** ``_fit_predict_fold``，参数逐位相同，
+    因此并行只改变"谁来算"，不改变算出来的数。
+    """
+    st = _PERM_STATE
+    prepped = None if X_tr_prepped is None else (X_tr_prepped, X_te_prepped)
+    try:
+        pred, kind = _fit_predict_fold(
+            st["cfg"], st["spec"], st["X"], y_use, tr, te, st["params"], seed,
+            task=st["task"], prepped=prepped,
+        )
+        return pred, kind, None
+    except Exception as exc:  # noqa: BLE001 —— 与串行路径一致：整轮记 nan
+        return None, None, f"{type(exc).__name__}: {exc}"
 
 
 def y_randomization(
@@ -172,8 +203,16 @@ def y_randomization(
 
     ``mode="fast"``：固定外层折与最优超参，只重跑外层拟合（成本 = n_perm×R×k）。
     报告里必须注明"置换采用固定超参"，这是保守做法。
-    ``mode="full"``：每轮完整重跑（本函数不实现，由调用方用 run_nested_cv 处理）。
+    ``mode="full"``：每轮完整重跑（**本版本未实现**）。传入 full 会直接抛
+    ``NotImplementedError``；绝不能"按 full 标注、按 fast 执行"，那会让报告写出
+    一句没执行过的协议。
     """
+    if str(mode).lower() != "fast":
+        raise NotImplementedError(
+            f"置换模式 {mode!r} 未实现：当前只有 fixed-hyperparameter（fast）路径。"
+            "真要做 full（每轮重搜超参），请先实现每轮 run_nested_cv，再改这里与 "
+            "config.validate_config 的 E-CFG-045 校验。"
+        )
     cfg = ctx.cfg
     ds = ctx.ds
     task = ds.task
@@ -208,21 +247,24 @@ def y_randomization(
             fold_cache.clear()
             warn(f"置换检验的折级预处理缓存不可用（{type(exc).__name__}: {exc}），退回逐次重建")
 
-    def one_run(y_use: np.ndarray) -> float:
-        preds, truths = [], []
-        kinds: list[str] = []
-        for r, outer in enumerate(outer_by_repeat):
-            for k, (tr, te) in enumerate(outer):
-                pred, kind = _fit_predict_fold(cfg, spec, ds.X, y_use, tr, te, fixed_params,
-                                               seed=(int(cfg["runtime"]["seed"]) + r * 1000) * 100 + k,
-                                               task=task, prepped=fold_cache.get((r, k)))
-                preds.append(pred)
-                truths.append(y_use[te])
-                kinds.append(kind)
-        yt = np.concatenate(truths)
-        yp = np.concatenate(preds)
+    # 折清单固定一次：串行与并行路径都按这个顺序拼接预测，池化指标才与旧实现逐位一致
+    fold_list: list[tuple[int, int, np.ndarray, np.ndarray]] = [
+        (r, k, tr, te)
+        for r, outer in enumerate(outer_by_repeat)
+        for k, (tr, te) in enumerate(outer)
+    ]
+    base_seed = int(cfg["runtime"]["seed"])
+
+    def _fold_seed(r: int, k: int) -> int:
+        return (base_seed + r * 1000) * 100 + k
+
+    def _metric_of(y_use: np.ndarray, preds: list[np.ndarray], kinds: list[str]) -> float:
+        """把逐折预测按 fold_list 顺序拼起来算池化指标（串行/并行共用同一段代码）。"""
         from .metrics import classification_metrics, regression_metrics
 
+        truths = [y_use[te] for _r, _k, _tr, te in fold_list]
+        yt = np.concatenate(truths)
+        yp = np.concatenate(preds)
         if task == "regression":
             return float(regression_metrics(yt, yp)[metric])
         proba_kind = "native" if all(k == "native" for k in kinds) else (
@@ -231,8 +273,20 @@ def y_randomization(
         return float(classification_metrics(yt, score, n_classes=len(ds.classes or [2]),
                                             proba_kind=proba_kind)[metric])
 
-    # 置换彼此独立，完全可以并行；旧实现串行跑 n_perm×R×k 次拟合，
-    # 在 200 次置换时成了整条链的瓶颈，而且没复用 --n-jobs。
+    def one_run(y_use: np.ndarray) -> float:
+        preds, kinds = [], []
+        for r, k, tr, te in fold_list:
+            pred, kind = _fit_predict_fold(cfg, spec, ds.X, y_use, tr, te, fixed_params,
+                                           seed=_fold_seed(r, k), task=task,
+                                           prepped=fold_cache.get((r, k)))
+            preds.append(pred)
+            kinds.append(kind)
+        return _metric_of(y_use, preds, kinds)
+
+    # 置换彼此独立，完全可以并行。
+    # 后端选择有实测依据：这里用 **进程** 而不是线程。xgb 在 4 线程下只有
+    # 0.76–0.83x（GIL 争用，比串行还慢），rf 也只有 1.23x；换成 loky 进程后
+    # 4 worker 就有 3.5x、8 worker 5.25x。
     n_perm = int(n_perm)
     perms = [permute_y_sample_level(y, groups, rng) for _ in range(n_perm)]
     null_vals = np.empty(n_perm, dtype=float)
@@ -245,32 +299,82 @@ def y_randomization(
             warn(f"置换 {idx + 1} 失败：{type(exc).__name__}: {exc}")
             return float("nan")
 
-    if jobs <= 1 or n_perm <= 1:
+    if n_perm <= 0:
+        null_vals = np.empty(0, dtype=float)
+    elif jobs <= 1 or n_perm <= 1:
         for i, y_perm in enumerate(perms):
             null_vals[i] = _one(y_perm, i)
             if (i + 1) % max(1, n_perm // 5) == 0:
                 info(f"  Y-randomization {i + 1}/{n_perm}")
     else:
-        from joblib import Parallel, delayed
+        # 第 0 次置换先串行跑：既当热身，又用来实测"单折拟合要多久"。
+        # 没有这一步，smoke 那种总共 0.2s 的置换会被 10 个 worker 的启动成本
+        # 吃掉（实测 0.2s → 22s）。
+        from .utils import parallel_pays_off
 
-        info(f"  Y-randomization 并行：n_jobs={jobs}，共 {n_perm} 次置换")
-        try:
-            # 必须用**有序**生成器：结果按提交顺序逐个到达，才能保证 null_vals[i]
-            # 就是第 i 次置换的值。旧写法用 generator_unordered 却按到达序号写数组，
-            # 零分布的逐置换数值是乱的（统计量不受影响，但 permutation.json 不可复现、
-            # F6 散点顺序随机）。
-            gen = Parallel(n_jobs=jobs, prefer="threads", return_as="generator")(
-                delayed(_one)(y_perm, i) for i, y_perm in enumerate(perms))
-            for done, val in enumerate(gen, start=1):
-                null_vals[done - 1] = val
-                if done % max(1, n_perm // 5) == 0:
-                    info(f"  Y-randomization {done}/{n_perm}")
-        except TypeError:
-            # joblib < 1.3 不支持 return_as，退回一次性收集
-            vals = Parallel(n_jobs=jobs, prefer="threads")(
-                delayed(_one)(y_perm, i) for i, y_perm in enumerate(perms))
-            null_vals[:] = np.asarray(vals, dtype=float)
-            info(f"  Y-randomization 完成 {n_perm}/{n_perm}")
+        t0 = time.perf_counter()
+        null_vals[0] = _one(perms[0], 0)
+        first_seconds = time.perf_counter() - t0
+        per_task = first_seconds / max(1, len(fold_list))
+        rest_tasks = (n_perm - 1) * len(fold_list)
+        if not parallel_pays_off(rest_tasks, per_task, jobs):
+            info(f"  Y-randomization 串行：预估剩余 {human_duration(per_task * rest_tasks)}，"
+                 f"并行启动成本（≈{jobs} worker）摊不平")
+            for i in range(1, n_perm):
+                null_vals[i] = _one(perms[i], i)
+                if (i + 1) % max(1, n_perm // 5) == 0:
+                    info(f"  Y-randomization {i + 1}/{n_perm}")
+        else:
+            from joblib import Parallel, delayed
+
+            n_tasks = rest_tasks
+            info(f"  Y-randomization 并行：n_jobs={jobs}（进程），{n_perm - 1} 次置换 × "
+                 f"{len(fold_list)} 折 = {n_tasks} 个拟合任务"
+                 f"（单折实测 {per_task * 1000:.0f} ms）")
+
+            def _tasks():
+                """按 (置换, 折) 派任务：粒度比"一次置换"细，尾部空转更少。
+
+                置换本身仍在主进程按原 rng 顺序先生成，worker 只拿到"某一折的输入"，
+                所以并行不改变任何一次置换的内容。
+                """
+                for i in range(1, n_perm):
+                    for r, k, tr, te in fold_list:
+                        pr = fold_cache.get((r, k))
+                        yield delayed(_perm_fold_task)(
+                            perms[i], tr, te, _fold_seed(r, k),
+                            None if pr is None else pr[0],
+                            None if pr is None else pr[1],
+                        )
+
+            out = Parallel(n_jobs=jobs, initializer=_perm_worker_init,
+                           initargs=(ds.X, cfg, spec, fixed_params, task))(_tasks())
+
+            order = [(i, r, k) for i in range(1, n_perm) for r, k, _tr, _te in fold_list]
+            buckets: dict[int, dict[tuple[int, int], tuple]] = {}
+            errors: list[str] = []
+            for (i, r, k), (pred, kind, err) in zip(order, out):
+                buckets.setdefault(i, {})[(r, k)] = (pred, kind, err)
+                if err is not None:
+                    errors.append(err)
+
+            keys = [(r, k) for r, k, _tr, _te in fold_list]
+            for i in range(1, n_perm):
+                got = buckets.get(i, {})
+                if any(got.get(kk, (None, None, "missing"))[2] is not None for kk in keys):
+                    null_vals[i] = float("nan")
+                    continue
+                try:
+                    null_vals[i] = _metric_of(perms[i], [got[kk][0] for kk in keys],
+                                              [got[kk][1] for kk in keys])
+                except Exception as exc:  # noqa: BLE001
+                    warn(f"置换 {i + 1} 的指标计算失败：{type(exc).__name__}: {exc}")
+                    null_vals[i] = float("nan")
+                if (i + 1) % max(1, n_perm // 5) == 0:
+                    info(f"  Y-randomization {i + 1}/{n_perm}")
+            if errors:
+                warn(f"置换检验有 {len(errors)} 个折拟合失败（首个：{errors[0]}），"
+                     f"对应置换已记为无效")
 
     valid = null_vals[np.isfinite(null_vals)]
     if valid.size < 5:
@@ -295,19 +399,24 @@ def y_randomization(
         "null_min": float(valid.min()),
         "null_max": float(valid.max()),
         "n_perm": int(valid.size),
+        # n_perm 是**有效**置换数（失败的置换被 isfinite 剔除），p 的硬下限是
+        # 1/(1+n_perm)。请求值与有效值必须分开记，否则少几次失败就会让 p 低于
+        # 「1/(1+n_perm_requested)」这个读者以为的下限。
+        "n_perm_requested": int(n_perm),
         "n_extreme": n_extreme,
         "p_value": float(p_value),
         "significant": bool(p_value < 0.05),
-        "mode": mode,
+        "mode": "fast",              # 实际执行路径；full 未实现，不能按请求值落盘
+        "mode_requested": str(mode),
         "fixed_hyperparams": bool(fixed_params),
         "null_values": [float(v) for v in valid],
         # 论文可直引的句子，指标名必须是展示名（R² / AUROC），不能漏出内部名 r2
         "conclusion": (
             f"观测 {METRIC_LABELS.get(metric, metric)}={obs_metric:.4f} 位于零分布之外"
-            f"（p={p_value:.4f}），说明模型学到的是真实关系而非噪声"
+            f"（p={fmt_p(p_value)}），说明模型学到的是真实关系而非噪声"
             if p_value < 0.05 else
             f"观测 {METRIC_LABELS.get(metric, metric)}={obs_metric:.4f} 与零分布无显著差异"
-            f"（p={p_value:.4f}），不能排除模型在拟合噪声"
+            f"（p={fmt_p(p_value)}），不能排除模型在拟合噪声"
         ),
     }
 

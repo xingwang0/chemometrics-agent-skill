@@ -90,7 +90,7 @@ DEFAULTS: dict[str, Any] = {
     "permutation": {
         "enabled": True,
         "n_perm": 200,
-        "mode": "fast",                # fast（固定超参）| full（完整嵌套）
+        "mode": "fast",                # 仅 fast（固定超参）已实现；full 会被 E-CFG-045 拒绝
         "alpha": 0.05,
     },
     "ad": {
@@ -204,6 +204,48 @@ def config_conflicts(old: dict, new: dict) -> list[str]:
                 for m in (new.get("models") or [])]
     if o_models != n_models:
         out.append(f"models：{[m[0] for m in o_models]} → {[m[0] for m in n_models]}")
+
+    # 下面这些字段一改，cv/ 里的数字就不再对应新配置的语义，而报告层是**直接读**
+    # 这些字段描述方法与口径的（report.py 的 Methods、§三 验证方案）。旧实现只比
+    # 任务/数据/模型，于是「换 split.strategy 复用同一 --out」会静默覆盖
+    # config.resolved.json：报告写「留一批次外部验证」，数字却来自嵌套分组 CV。
+    def _g(d: dict, *keys, default=None):
+        cur: Any = d or {}
+        for k in keys:
+            if not isinstance(cur, dict):
+                return default
+            cur = cur.get(k, default)
+        return cur
+
+    def _norm(v: Any) -> Any:
+        return [str(x) for x in v] if isinstance(v, (list, tuple)) else v
+
+    pairs = [
+        ("split.strategy", _g(old, "split", "strategy"), _g(new, "split", "strategy")),
+        ("split.group_col", _g(old, "split", "group_col"), _g(new, "split", "group_col")),
+        ("split.outer.n_splits", _g(old, "split", "outer", "n_splits"),
+         _g(new, "split", "outer", "n_splits")),
+        ("data.format", _g(old, "data", "format"), _g(new, "data", "format")),
+        ("data.id_col", _g(old, "data", "id_col"), _g(new, "data", "id_col")),
+        ("data.batch_col", _g(old, "data", "batch_col"), _g(new, "data", "batch_col")),
+        ("data.replicate_col", _g(old, "data", "replicate_col"),
+         _g(new, "data", "replicate_col")),
+        ("data.feature_mode", _g(old, "data", "feature_mode"),
+         _g(new, "data", "feature_mode")),
+        ("data.feature_cols", _norm(_g(old, "data", "feature_cols")),
+         _norm(_g(new, "data", "feature_cols"))),
+        ("data.drop_cols", _norm(_g(old, "data", "drop_cols")),
+         _norm(_g(new, "data", "drop_cols"))),
+        ("data.exclude_from_features", _norm(_g(old, "data", "exclude_from_features")),
+         _norm(_g(new, "data", "exclude_from_features"))),
+        ("preprocess.candidates", _g(old, "preprocess", "candidates"),
+         _g(new, "preprocess", "candidates")),
+        ("evaluation.metrics", _norm(_g(old, "evaluation", "metrics")),
+         _norm(_g(new, "evaluation", "metrics"))),
+    ]
+    for label, o_val, n_val in pairs:
+        if o_val != n_val:
+            out.append(f"{label}：{o_val} → {n_val}")
     return out
 
 
@@ -288,7 +330,13 @@ def apply_overrides(cfg: dict, overrides: list[str]) -> dict:
             else:
                 raise ConfigError("E-CFG-004", f"--set 路径不可达：{item!r}")
         last = path[-1]
-        value = _coerce(raw)
+        # 列名一律按字符串处理：`--set data.id_col=001` 若走数字推断会变成 1，
+        # 表头里永远是 "001"，报错信息还看不出是前导零被吃掉。
+        _raw_stripped = raw.strip()
+        if last.endswith("_col") and not _raw_stripped.startswith(("[", "{")):
+            value = _raw_stripped
+        else:
+            value = _coerce(raw)
         if isinstance(cursor, list):
             try:
                 cursor[int(last)] = value
@@ -448,7 +496,6 @@ def _apply_budget(cfg: dict, budget: str) -> dict:
         if model.get("search_type") == "random":
             base = model.get("n_iter", 30)
             model["n_iter"] = int(min(base, tree_iter)) if base else int(tree_iter)
-            model["_n_iter_budget"] = tree_iter
     return out
 
 
@@ -458,6 +505,66 @@ def _apply_budget(cfg: dict, budget: str) -> dict:
 def validate_config(cfg: dict) -> list[str]:
     """返回 warning 列表；致命问题抛 ConfigError。"""
     warnings: list[str] = []
+
+    # ---- 列表字段必须是列表（放在最前：后面的 .get/.iter 都假设它们可迭代） ----
+    # `--set` 对列表是整体替换，`--set data.drop_cols=time` 会把列表降级成字符串，
+    # 而 io_data 里 `roles.update(<str>)` 会把字符串按**字符**拆开，于是 drop_cols
+    # 里那一列照旧进特征矩阵——正是文档反复警告的目标泄漏，却没有任何报错。
+    for name, val in (
+        ("task.target", cfg.get("task", {}).get("target")),
+        ("data.drop_cols", cfg.get("data", {}).get("drop_cols")),
+        ("data.feature_cols", cfg.get("data", {}).get("feature_cols")),
+        ("data.na_values", cfg.get("data", {}).get("na_values")),
+        ("data.exclude_from_features", cfg.get("data", {}).get("exclude_from_features")),
+        ("ad.methods", cfg.get("ad", {}).get("methods")),
+        ("evaluation.metrics", cfg.get("evaluation", {}).get("metrics")),
+        ("models", cfg.get("models")),
+        ("preprocess.candidates", cfg.get("preprocess", {}).get("candidates")),
+    ):
+        if val is None:
+            continue
+        if not isinstance(val, (list, tuple)):
+            raise ConfigError(
+                "E-CFG-046",
+                f"{name} 必须是列表，收到 {type(val).__name__} {val!r}。\n"
+                f"  --set 对列表是**整体替换**，`--set {name}={val}` 会把它降级成标量，"
+                f"下游按元素读取时行为不可预期（例如 drop_cols 会按字符拆开、等于没删）。\n"
+                f"  - 删单个元素：--set-remove {name}=<元素>\n"
+                f"  - 整体重写：--set '{name}=[\"a\", \"b\"]'（JSON 双引号）",
+            )
+
+    # 列名字段一律字符串：`--set data.id_col=001` 曾被 _coerce 当成整数 1，
+    # `--set task.target=2024` 会让 target 变 int，随后在表头里永远找不到。
+    for container, key in (
+        (cfg.get("data") or {}, "id_col"), (cfg.get("data") or {}, "batch_col"),
+        (cfg.get("data") or {}, "replicate_col"), (cfg.get("split") or {}, "group_col"),
+    ):
+        v = container.get(key)
+        if v is not None and not isinstance(v, str):
+            container[key] = str(v)
+    if cfg.get("task", {}).get("target") is not None:
+        cfg["task"]["target"] = [str(t) for t in cfg["task"]["target"]]
+    for name in ("drop_cols", "feature_cols", "exclude_from_features"):
+        vals = (cfg.get("data") or {}).get(name)
+        if vals is not None:
+            cfg["data"][name] = [str(t) for t in vals]
+
+    # ---- permutation.mode：full 尚未实现，必须在开跑前拦下 ----
+    # 否则会先跑完 CV（几小时）才在 perm 阶段发现，或者更糟——照跑 fast 路径，
+    # 却把 mode 原样写进 permutation.json，report/Methods 于是写出
+    # 「每轮置换重新搜索超参」这句从未执行过的协议。
+    perm_mode = str((cfg.get("permutation") or {}).get("mode", "fast") or "fast").lower()
+    if perm_mode not in ("fast", "full"):
+        raise ConfigError(
+            "E-CFG-045", f"permutation.mode 只能是 fast / full，收到 {perm_mode!r}")
+    if perm_mode == "full":
+        raise ConfigError(
+            "E-CFG-045",
+            "permutation.mode=full（每轮置换重新搜索超参）在本版本**未实现**。\n"
+            "  当前置换始终固定超参（fast 路径）；若按 full 落盘，报告与 Methods 会写成"
+            "「连超参数一起重新搜索」，那是一句没有执行过的协议。\n"
+            "  - 要跑置换：保持 permutation.mode=fast（默认），报告会如实标注「固定超参」；\n"
+            "  - 确实需要 full：先实现每轮 run_nested_cv，再放开 references/config-schema.md 的说明。")
 
     if cfg.get("_schema") != SCHEMA_ID:
         warnings.append(f"E-CFG-010 配置缺少 _schema={SCHEMA_ID}，按当前版本解析")

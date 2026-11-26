@@ -612,7 +612,7 @@ def _rank_within_target() -> tuple[bool, str]:
     ranked = rank_models(summary, "regression").set_index(["target", "model"])
     if ranked.loc[("含量", "a"), "rank"] != 1 or ranked.loc[("水分", "b"), "rank"] != 1:
         return _fail("rank 未按目标分组计算：\n" + ranked["rank"].to_string())
-    if ranked.loc[("水分", "b"), "rmse_gap_to_best"] != 0.0:
+    if ranked.loc[("水分", "b"), "r2_gap_to_best"] != 0.0:
         return _fail("gap_to_best 跨目标计算，水分内最优的 gap 不为 0")
 
     summary.to_csv(tmp / "cv" / "metrics_summary.csv", index=False)
@@ -1028,7 +1028,13 @@ def _p_zeros() -> tuple[bool, str]:
                 bad.append(f"{field}({v})={txt}")
     if bad:
         return _fail("零值被渲染成 " + "、".join(bad))
-    return _ok("0 / -0.0 一律渲染为 0；-0.000 与 0.0000 结构上不可能出现")
+    # report.md 走的是 fmt_legacy（定点小数），必须在**字符串**上拦负零：
+    # -0.0004 在 3 位下就是 "-0.000"，只判 f == 0 是拦不住的。
+    for v, d in ((-0.0004, 3), (-1e-5, 2), (-0.0, 3)):
+        txt = p.fmt_legacy(v, d)
+        if txt.startswith("-") and not txt.lstrip("-").strip("0."):
+            return _fail(f"fmt_legacy({v}, {d})={txt!r} 仍是负零；report.md 会出现「-0.000」")
+    return _ok("0 / -0.0 一律渲染为 0；-0.000 与 0.0000 在 present 与 fmt_legacy 两条路径上都不可能出现")
 
 
 @check("present", "有量纲误差量用有效数字（不是固定小数位）")
@@ -1342,6 +1348,72 @@ def _leverage_formula() -> tuple[bool, str]:
         hint = f"（差值≈{diff:.6f}，1/n={expected:.6f}，说明少加了截距项）"
         return _fail(f"fit 与 score 的杠杆值不一致，最大偏差 {diff:.3e}{hint}")
     return _ok(f"两条路径的杠杆值完全一致（最大偏差 {diff:.2e}），+1/n 均未遗漏")
+
+
+@check("reporting", "杠杆判域必须相对训练参考集，不能相对待判样品自己")
+def _leverage_reference_set() -> tuple[bool, str]:
+    from sml.ad import fit_ad
+
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(90, 10))
+    groups = np.repeat([f"S{i}" for i in range(45)], 2)
+    cfg = {"ad": {"methods": ["leverage"], "pca_variance": 0.9, "pca_max_comp": 4, "knn_k": 3}}
+    ad = fit_ad(X, cfg, groups)
+
+    # 拿一条训练行**单独**打分：参考集仍是训练集，h 必须与 fit 时完全一致。
+    # 若 score() 误把待判样品自己当参考集，单行自参考会退化成 h=2.0（阈值通常 0.1–0.3），
+    # 于是所有新样品都被判域外——这是 _leverage_formula 用同一个 X 打分查不出来的。
+    i = 5
+    one = float(ad.score(X[i:i + 1])["leverage"].to_numpy(dtype=float)[0])
+    want = float(np.asarray(ad.self_lev_)[i])
+    if abs(one - want) > 1e-9:
+        return _fail(
+            f"单条训练行独立打分 h={one:.4f}，fit 时为 {want:.4f}（差 {one - want:+.4f}）。"
+            "score() 很可能把待判样品自身当成了杠杆参考集；单行自参考恒得 h=2.0，"
+            "会让 predict.py 把全部新样品判为域外")
+
+    h_new = float(ad.score(rng.normal(size=(1, 10)))["leverage"].to_numpy(dtype=float)[0])
+    if h_new >= 1.0:
+        return _fail(
+            f"单条新样品 h={h_new:.4f} ≥ 1，训练集均值为 {float(np.mean(ad.self_lev_)):.3f}，"
+            "说明参考集不是训练集")
+    return _ok(f"训练行单独打分与 fit 一致（h={one:.4f}），新样品 h={h_new:.3f} 未被误判")
+
+
+@check("reporting", "AD 汇总结论：各模型不一致时不得概称「有效」或「无差异」")
+def _ad_summary_consistency() -> tuple[bool, str]:
+    from sml.report import (ad_conclusion_summary_en, ad_conclusion_summary_zh,
+                            ad_verdict_summary)
+
+    mixed = {"per_model": {"knn": {"ad_verdict": "no_difference"},
+                           "pls": {"ad_verdict": "no_difference"},
+                           "rf": {"ad_verdict": "no_difference"},
+                           "svr": {"ad_verdict": "effective"},
+                           "xgb": {"ad_verdict": "no_difference"}}}
+    sm = ad_verdict_summary(mixed)
+    if sm["state"] != "mixed":
+        return _fail(f"5 个模型中 1 个 effective 应判 mixed，得到 {sm['state']}")
+    zh = ad_conclusion_summary_zh(sm, "regression")
+    en = ad_conclusion_summary_en(sm, "regression")
+    # 必须点出不一致、并点名有效/无差异的模型；否则 Methods 会与正文打架
+    for need in ("不一致", "svr", "knn"):
+        if need not in zh:
+            return _fail(f"mixed 结论漏了「{need}」：{zh}")
+    if "inconsistent" not in en or "svr" not in en:
+        return _fail(f"英文 mixed 结论不完整：{en}")
+
+    all_eff = {"per_model": {m: {"ad_verdict": "effective"} for m in ("a", "b")}}
+    sm2 = ad_verdict_summary(all_eff)
+    if sm2["state"] != "all_effective":
+        return _fail(f"全部 effective 应判 all_effective，得到 {sm2['state']}")
+    if "不一致" in ad_conclusion_summary_zh(sm2, "regression"):
+        return _fail("全部有效时不应出现「不一致」")
+
+    # 全是 None（样品太少没检验）不能被当成 none_effective（那是在说"检验过、无差异"）
+    untested = {"per_model": {m: {"ad_verdict": None, "ad_effective": None} for m in ("a", "b")}}
+    if ad_verdict_summary(untested)["state"] != "untested":
+        return _fail("全部未检验应判 untested，不能混进 none_effective")
+    return _ok("mixed 点名有效模型且显式写「不一致」；all_effective / untested 分支正确")
 
 
 @check("reporting", "h* 的两个 n 必须各自标注，且不得互相冒充")

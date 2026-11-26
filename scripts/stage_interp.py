@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -22,14 +23,14 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sml.interp import (  # noqa: E402
-    band_permutation_importance, build_band_groups, coef_stability,
+    _vip_boot_job, band_permutation_importance, build_band_groups, coef_stability,
     fit_fold_models, shap_values_safe, top_features, vip_scores,
 )
 from sml.io_data import impute_for_diagnostics  # noqa: E402
 from sml.models import build_pipeline, resolve_models  # noqa: E402
 from sml.selection import pick_best_model, spec_for_model  # noqa: E402
 from sml.stage_common import build_parser, prepare  # noqa: E402
-from sml.utils import info, warn, write_json  # noqa: E402
+from sml.utils import info, parallel_pays_off, resolve_workers, warn, write_json  # noqa: E402
 
 
 def _best_pls_components(ctx) -> int:
@@ -105,11 +106,13 @@ def run_interp(ctx) -> dict:
                     "best_metric": best}
 
     # 1) 波段置换重要性
-    fold_models = fit_fold_models(ctx, spec, folds)
+    n_jobs = resolve_workers(cfg["runtime"].get("n_jobs"))
+    fold_models = fit_fold_models(ctx, spec, folds, n_jobs=n_jobs)
     imp = band_permutation_importance(
         ctx, fold_models, groups,
         n_repeats=int(cfg["interp"].get("perm_repeats", 10)),
         seed=int(cfg["runtime"]["seed"]),
+        n_jobs=n_jobs,
     )
     if not imp.empty:
         imp.to_csv(out_dir / "importance.csv", index=False, encoding="utf-8")
@@ -146,14 +149,26 @@ def run_interp(ctx) -> dict:
             rng = np.random.default_rng(int(cfg["runtime"]["seed"]))
             uniq = pd.unique(ds.groups)
             member = {g: np.flatnonzero(ds.groups == g) for g in uniq}
-            boots = []
+            # 抽签序列先在主进程生成（与串行实现逐次相同），再并行算 100 次 PLS；
+            # 光谱数据上 PLS 单次可达数十毫秒，这里并行是有效收益。
+            picks: list[np.ndarray] = []
             for _ in range(100):
                 picked = rng.integers(0, uniq.size, size=uniq.size)
-                idx = np.concatenate([member[uniq[i]] for i in picked])
-                try:
-                    boots.append(vip_scores(Xdiag[idx], y_vec[idx], k))
-                except Exception:  # noqa: BLE001
-                    continue
+                picks.append(np.concatenate([member[uniq[i]] for i in picked]))
+            if n_jobs > 1 and len(picks) > 1:
+                from joblib import Parallel, delayed
+
+                t0 = time.perf_counter()
+                first = _vip_boot_job(Xdiag, y_vec, picks[0], k)
+                per_task = time.perf_counter() - t0
+                if parallel_pays_off(len(picks) - 1, per_task, n_jobs):
+                    res = [first] + list(Parallel(n_jobs=n_jobs)(
+                        delayed(_vip_boot_job)(Xdiag, y_vec, idx, k) for idx in picks[1:]))
+                else:
+                    res = [first] + [_vip_boot_job(Xdiag, y_vec, idx, k) for idx in picks[1:]]
+            else:
+                res = [_vip_boot_job(Xdiag, y_vec, idx, k) for idx in picks]
+            boots = [b for b in res if b is not None]
             vip_df = pd.DataFrame({"feature": ds.feature_names, "vip": vip,
                                    "above_1": vip > 1.0})
             if boots:

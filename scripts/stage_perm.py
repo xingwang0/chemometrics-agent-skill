@@ -21,7 +21,7 @@ from sml.models import resolve_models  # noqa: E402
 from sml.permutation import y_randomization  # noqa: E402
 from sml.selection import fixed_params_for, pick_best_model, spec_for_model  # noqa: E402
 from sml.stage_common import build_parser, prepare  # noqa: E402
-from sml.utils import info, warn, write_json  # noqa: E402
+from sml.utils import info, resolve_workers, warn, write_json  # noqa: E402
 
 
 def _observed_from_oof(ctx, model_name: str, metric: str) -> float | None:
@@ -62,9 +62,10 @@ def run_perm(ctx) -> dict:
     if observed is None or not np.isfinite(observed):
         observed = float(best.get(metric, float("nan")))
 
-    n_jobs = int(cfg["runtime"].get("n_jobs", 1) or 1)
+    n_jobs = resolve_workers(cfg["runtime"].get("n_jobs"))
     info(f"Y-randomization：模型 {model_name}，n_perm={n_perm}"
-         f"（样品级置换，分组结构保持不变，n_jobs={n_jobs}）")
+         f"（样品级置换，分组结构保持不变，n_jobs={n_jobs} 进程）")
+
     result = y_randomization(
         ctx, spec,
         obs_metric=observed,

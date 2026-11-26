@@ -2,6 +2,274 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
+## [1.2.5] - 2026-11-26
+
+第四轮真实数据复现（一份 100+ 行的中等规模光谱数据、2 个目标、B 套 5×3×5）暴露的 5 条问题。
+**数值零变化**：重算 `metrics_summary` 的浮点差 ≤1e-15，`rank` 与 `p_BH` 完全相同。
+
+### 修复（结论一致性）
+
+- **Methods / limitations / 审稿清单的 AD 结论，取的是「第一个模型」**（`sml/report.py`）
+  三处都写 `next(iter(per_model.values()))`。当各模型判定不一致时（本轮目标二：1 个
+  `effective` + 4 个 `no_difference`），报告正文写「各模型不一致」，而 Methods 与
+  limitations 写「无显著差异」——同一份交付物自相矛盾，作者照抄 Methods 就会把唯一
+  那条有效结论丢掉（反过来，第一个模型是 effective 时会把无效写成有效）。
+  新增 `ad_verdict_summary()` 汇总五态（all_effective / none_effective / mixed /
+  all_conflict / untested），上述三处统一用它；`mixed` 时点名哪些模型有效、哪些无差异。
+
+- **多目标 run 不给总耗时**（`run_pipeline.py`）
+  每个子 run 打印自己的「总耗时」，末行 `多目标完成` 没有时长，读者会把最后一个目标的
+  时间当成整次运行的时间（本轮复现因此把 21.3 分钟引成 10.2 分钟，算错加速倍数）。
+  现在末行输出 `总耗时 X 分钟`（整个 fanout 的墙钟）。
+
+- **`comparison.csv` 的 `metric_primary=True` 标在 `rmse` 行**（`sml/compare.py`）
+  `PRIMARY_METRIC` 的回归值改为 `r2`，与 `selection.PRIMARY_BY_TASK`、`_best_by_primary`、
+  `pick_best_model` 同一把尺子。RMSE 仍会在比对表里，只是不再冒充主指标。
+  BH 家族成员不变，`p_BH` 数值 0 变化。
+  **连带影响**：`comparison.csv` 的 `wilcoxon_p` 也改为按 R² 做配对 Wilcoxon（原按 RMSE）。
+  该列只写不读（`report` / `plots` 都不消费它），故不改变任何报告结论；
+  需要按 RMSE 做 Wilcoxon 的下游请自行重算。
+  顺带修 `rank_models` 的兜底分支：不再退回「刚被判定缺失的那个指标」，改为按
+  mae → rmse → bias 依次找存在的列。
+
+### 修复（显式失败）
+
+- **旧 `ad_model.joblib` 静默降级**（`sml/ad.py`、`sml/final_model.py`）
+  1.2.4 起 `score()` 在缺少训练参考集时只 `warn` 一句，然后退回「待判样品自己当参考集」，
+  于是 `predictions.csv` 的 `ad_flag` 几乎恒为 1，而文件看起来完全正常。
+  现在：`predict.py` 直接报 `E-PRED-006`（附重建命令与 `--no-ad` 两种出路），
+  `score()` 抛 `RuntimeError`。
+  新增 `AD_SCHEMA_VERSION = 2` 与 `ad_model_version()`；1.2.4 生成的模型带 `T_train_`
+  但没有版本号，按 v2 处理——只拦真正缺参考集的 ≤1.2.3 模型，避免逼用户重建本来就没问题的模型。
+
+### 修复（噪音）
+
+- **中文目录 + 多进程的告警重复 4 次**（`run_pipeline.py`）
+  改为每个 run 目录只提醒一次；判断从 `int(n_jobs) > 1` 换成 `resolve_workers(...) > 1`，
+  `n_jobs=-1`（默认「用满核」）也能触发——旧写法 `-1 > 1` 为假，最需要提醒的场景反而不提醒。
+
+### 其他
+
+- 自检 54 → 55 项：新增「AD 汇总结论：各模型不一致时不得概称『有效』或『无差异』」，
+  对应上面 Methods / limitations / 审稿清单三处取「第一个模型」的修复。
+- `README.md` 与 `references/environment.md` 的自检项数与 `SKILL.md` 对齐（此前仍写 53）。
+
+### 已知未修（截至 1.2.5）
+
+以下条目在 2026-11-26 的审计里记录在案，**不改变任何已跑出结论**，但会影响他人按报告复算时的对账：
+
+| 位置 | 问题 | 影响 |
+|---|---|---|
+| `sml/audit.py` vs `sml/ad.py` | audit 用 `pca_max_comp` 估杠杆退化，ad 用实际解释方差成分数 | 小样本时一个报「AD 退化」、另一个报 `ad_reliable=true` |
+| `sml/final_model.py` | 分类 `predict.py` 输出标签编码 0..N−1，`label_map` / `positive_label` 存了不用 | 用户与原表按类名对照会错位 |
+| `sml/final_model.py` | 中位数向量尺寸不符时静默 `nan_to_num(nan=0)` | 光谱填 0 看起来"正常" |
+| `sml/metrics.py` | RPIQ 无置信区间（充分统计量给不出四分位） | `metrics_ci.csv` 永远缺 RPIQ 行，与文档「各自 95% CI」不符 |
+| `sml/tune.py` + `sml/cv.py` | 内层某折只剩单一类别 → `log_loss` 全 NaN → 该外层折整体报废；`n_folds_ok` 的分母不含失败折 | 「3(3/3)」实为 3/25 |
+| `sml/selection.py` | 仅 1 个有效折的模型仍可被选为最优并写入 `final_model` | 无最小成功折比例门槛 |
+| `scripts/run_pipeline.py` | `--run-dir` 模式静默忽略 `--n-jobs/--seed/--budget` | 用户以为参数生效 |
+| `sml/utils.py` | 中文字体缺失时静默出方块，不进 `figure_qc.json` | 换机跑批时整批图是方块而日志干净 |
+
+## [1.2.4] - 2026-11-26
+
+审计修复版本。**CV 指标（`cv/*.csv`）数值不变**；变的是 AD 判域、配置校验、AD 有效性
+检验口径与展示层文案。其中前两条属于「会让论文写出没做过的事」的级别。
+
+### 修复（正确性）
+
+- **`ADModel.score()` 的杠杆参考集用错（阻塞级）**（`sml/ad.py`）
+  `h_i = t_iᵀ(TᵀT)⁻¹t_i + 1/n` 里的 `T` 与 `n` 取自**被打分的那批样品自己**，而不是训练集。
+  m 行批量时 `Σh ≈ min(k,m)+1`，单行打分恒得 `h=2.0`，而阈值通常 0.1–0.3 →
+  **`predict.py` 把所有新样品判为域外**，`ad_flag` 恒为 1。
+  实测（k=10, n_train=180, h*=0.183）：m=1/5/10 越界率 100%，m=50 为 62%，m=180 才恢复正常。
+  报告里查不出来：`stage_ad` 对全量自打分时 `T_new ≡ T_train`，两条路径天然一致；
+  53 项自检的 `_leverage_formula` 也用同一个 X 做 fit 与 score，结构上无法发现。
+  现 `_leverage(T, T_ref)` 显式区分「被打分的点」与「参考集」，`ADModel` 保存 `T_train_`。
+  **旧 run 需用 `--stages ad,report` 重跑**（`ad/ad_model.joblib` 里没有训练参考集，旧文件会走兼容分支并告警）；`--retrain` 只重建 `final_model.joblib`，不重建 AD 模型。
+
+- **`permutation.mode=full` 标注为 full、实际跑 fast**（`sml/permutation.py`、`sml/config.py`）
+  `full` 从未实现，但 `mode` 被原样写进 `permutation.json`，`report.py` 见到 `!= fast`
+  就渲染「连超参数一起重新搜索」——一句没有执行过的方法学陈述。
+  现在配置阶段即报 `E-CFG-045`；`permutation.json` 只记录实际执行的 `mode=fast`（另存 `mode_requested`）。
+
+- **`--set` 把列表字段降级成字符串导致静默泄漏**（`sml/config.py`）
+  `--set data.drop_cols=time` → `"time"` → `io_data.roles.update("time")` 按**字符**拆成
+  `{'t','i','m','e'}`，`time` 列照旧进特征矩阵，不报错不告警——正是文档反复警告的泄漏路径。
+  现在对 9 个列表字段强制类型，报 `E-CFG-046` 并提示 `--set-remove` / JSON 列表写法。
+  同时修 `--set data.id_col=001` 前导零被吃成 `1`、`--set task.target=2024` 变 int 的问题。
+
+- **AD 有效性检验按 OOF 行做**（`sml/ad.py`）
+  60 样品 ×3 重复 ×2 repeat = 360 行，`len>5` 门槛等价于「1 个样品」；同一样品残差高度相关，
+  Mann-Whitney 的独立性假设被破坏 → p 偏小、"有效"偏容易成立。
+  现按样品平均绝对误差检验（`test_unit=group`），行口径另存 `row_mannwhitney_p_greater` 备查。
+  实测同一数据：行口径 p=1.9e-06，样品口径 p=5.1e-04。
+
+- **`ad_reliability.leverage_threshold` 报的不是判域线**（`stage_ad.py`）
+  旧代码把理论线 `3(k+1)/n_rows` 赋给它，注释却写「与 `ad_scores.csv` 同值」；
+  q95 主导时两者不等（例 0.165 vs 0.565）。现改用 `diag["leverage_threshold"]`，
+  另存 `leverage_threshold_theory` / `leverage_q95` / `leverage_threshold_rule`。
+
+- **`score()` 的 kNN 少算一阶邻居**（`sml/ad.py`）
+  fit 用「第 k 个**他人**」估阈值，score 取 `dist[:,-1]`；自打分时最近邻是自己（距离 0），
+  实际落到第 k−1 个他人 → `ad_scores.csv` 的 kNN 判据系统性偏松。现多取一列并识别自身命中。
+
+- **`config_conflicts` 只比较 4 个字段**（`sml/config.py`）
+  换 `split.strategy` / `drop_cols` / `preprocess.candidates` 复用同一 `--out` 时，
+  `config.resolved.json` 被静默覆盖，报告描述与实际数字错配。现扩到 13 项。
+
+- **`--resume` 会让 `--seed` 之外的无害改动也触发全量重跑**（文档已如实说明）
+  见 `SKILL.md`「三条容易忘的」。
+
+### 修复（展示层）
+
+- `present.fmt_legacy` 加负零归零：`-0.000` 结构上不再可能出现（旧版只在 HTML 成立）。
+- p 值统一走 `present.fmt_p`（3 位 + `p<0.001` / `p>0.999`）；`report.md` 不再出现 `p=0.0005`。
+- T2 表格单元格按字段规格裁决精度（R² 3 位、RPD 2 位、RMSE 4 位有效数字），不再一律 3 位。
+- Methods 与 HTML 验证方案改用**实际折数/重复次数**（`cv_summary.n_outer_folds`、
+  `effective_repeats`），`loo_batch` 下不再虚报「5 折 × 重复 5 次」。
+
+### 修复（文档与实现对齐）
+
+- `permutation.mode=full`、Youden 阈值两处「声称做了但没做」的表述改为事实描述：
+  管线分类阈值固定 0.5，`_youden_threshold()` 无调用点。
+- 版本号统一为 1.2.4（`SKILL.md` / `sml.__version__` / `CITATION.cff`）。
+- 自检 53 → 54 项：新增「杠杆判域必须相对训练参考集」，覆盖旧版结构性盲区。
+
+## [1.2.3] - 2026-11-25
+
+纯性能版本：**产物数值与 1.2.2 逐位相同**（同一数据实测 `oof_predictions.csv`、
+`fold_results.csv`、`importance.csv` 数值最大偏差 0.000e+00，置换零分布 200 个值
+全等），改的只是"谁来算、在哪算"。
+
+同一份 B 配置（2 目标 × 5 重复 × 5 外折 × 5 模型）实测：**41.6 min → 13.5 min（3.09×）**。
+
+### 修复（性能）
+
+- **置换检验用线程后端，等于没并行**（`sml/permutation.py`，最高优先级）
+  旧实现 `Parallel(..., prefer="threads")`。实测 xgb 在 4/12 线程下只有 **0.76–0.83×**
+  （GIL 争用，比串行还慢），rf 也只有 1.23×。改为 loky 进程 + 按 (置换, 折) 细粒度派任务
+  （200×25 = 5000 个任务，尾部空转更少），折模型通过 initializer 每个 worker 只传一次。
+  实测 perm 阶段 **828s → 95s（8.7×）**、**767s → 114s（6.7×）**。
+
+- **波段置换重要性完全串行**（`sml/interp.py`）
+  旧实现双层 for 循环：波段 × 重复 × 折，2000 列光谱上就是上万次 predict 一个接一个跑。
+  现在按 (波段 × 重复) 并行；**置换索引仍在主进程按原 rng 调用顺序生成**再分发给 worker，
+  所以每一次置换的内容与串行实现逐位相同。实测 **214s → 63s（3.4×）**。
+
+- **n_jobs=-1 被解析成核数**（`sml/utils.py`、`sml/cv.py`）
+  14 核异构大小核机器上把 worker 开满，反而不如留 8–10 个：E 核单核吞吐只有 P 核
+  六成，长任务派到慢核上拖尾。实测同一批 xgb 任务：4→3.0×、8→3.4~5.3×、10→4.4×、
+  14→3.5×。新增 `resolve_workers()`：`-1`/`0` → `round(0.7×核数)`（上限 24），
+  显式正整数原样使用。
+
+- **小数据上并行会倒亏**（`sml/utils.py` `parallel_pays_off`）
+  loky 起 10 个 worker 固定成本 2.4s，initializer 带大数组时 6s+。smoke 那种整个 run
+  只要 7 秒的数据上，perm 被从 0.2s 拖到 22s。现在 cv / interp / perm 都**先串行跑一个
+  单元实测耗时**，再据此决定剩下的是并行还是继续串行；实测 smoke 已回到 5.8s
+  （cv 1.2s / interp 0.9s / perm 0.2s，均不超过串行基线）。
+
+- **折模型重拟合与 VIP bootstrap 串行**（`sml/interp.py`、`stage_interp.py`）
+  `fit_fold_models` 的 N 个折、VIP 的 100 次按样品重采样都彼此独立，现按任务并行
+  （同样先热身判门槛）；bootstrap 的抽签序列仍在主进程预先生成，B 矩阵行序不变。
+
+### 说明（不影响结果）
+
+- 所有并行都在"独立任务级"：候选网格、折、置换、波段、bootstrap 重采样之间互不依赖，
+  每个任务的输入与随机数序列逐位不变，指标计算仍由主进程按原顺序拼接后完成。
+- `--dry-run` 的估时改用同一套 worker 解析 + 0.55 的实测并行效率系数。
+- 未改动：`n_perm` / `n_iter` / `repeats` / `n_splits` / 所有 seed 与 rng 调用顺序、
+  超参空间、指标定义与聚合口径。
+
+## [1.2.2] - 2026-11-25
+
+第三次全量复现（同一数据、同一配置，1.1.0 → 1.2.1）在数值上**逐格零差异**，
+但实测暴露出若干「会让结论写错」的缺陷。本版按实测修，**不改任何指标计算**：
+`cv/` 下的数值产物与 1.2.1 相同，变的只有判定、排名口径、措辞与单位呈现。
+
+### 修复（会改变结论的）
+
+- **D1 适用域有效性检验的方向写反了**（`sml/ad.py`，高）
+  回归分支 `mannwhitneyu(r_in, r_out, alternative="greater")` 的备择假设是
+  「域内误差 > 域外误差」，与要证的方向相反：域外确实更差时 p 顶到 0.99+，
+  `effective` 分支不可达、`reversed` 也永不触发，全部判成 `no_difference`；
+  分类分支的 `fisher_exact(..., alternative="less")` 同样写反。
+  现改为**秩方向判定**（Mann-Whitney 比的是秩/中位数）+ 方向标签 `effect_direction`，
+  同时落盘单侧与双向 p（`mannwhitney_p_greater` / `_less` / `_two`；分类为 `fisher_p_*`）。
+  实测影响：目标一由「全无差异」变为 5/5 模型显著有效（域外误差显著高于域内）；
+  目标二变为 2/5 有效、2/5 无差异、1/5 口径冲突。T5 的
+  「AD 是否有效」改为四态（是 / 否（无显著差异）/ 否（方向相反）/ 无法判定（口径冲突））。
+
+- **D1+ 判定用均值、检验用秩**（同一处，随 D1 一起修）
+  旧逻辑拿**均值**判 effective / reversed，而 Mann-Whitney 判的是秩：均值被少数
+  极端残差拉动时会与 p 值打架。某份真实数据上，XGB 的秩检验显著且中位数域外更高，
+  但均值域外更低，旧代码据此判 `reversed`，
+  等于用均值解释一个秩检验。现在两种口径打架时判 `conflict`（`ad_effective=None`），
+  报告写「无法判定（秩方向与均值方向相反）」并进 limitations，不再硬给结论；
+  `mean_abs_error_*` / `median_abs_error_*` / `mean_rank_direction_conflict` 一并落盘。
+
+- **AD 总结论只取首个模型**（`stage_ad.py`，D1 修复后显形）
+  各模型判定不一致时只报第一个会掩盖分歧（且读起来像"AD 有效"）。现在按判决分组
+  列出具体模型名，总结论改为「部分模型上适用域能区分出更差的预测，但不足以作为
+  统一的域外筛选依据」，并落盘 `verdict_mix`；逐模型明细仍看 T5。
+
+- **D4 排名与选模不同口径**（`sml/compare.py`）
+  `rank`/`gap_to_best` 按池化 RMSE 排、选模按折均值 R²，于是同一份报告里
+  「rank=1 的是折均值 R²=−0.21 的 KNN，而最优模型写 XGB」。现两者都用选模主指标
+  （回归 R²、分类 AUC）；gap 列随之改名 `r2_gap_to_best`（无 `r2` 列时才退回
+  `rmse_gap_to_best`）。
+
+- **D9 「最优模型」没有显著性支撑**（`sml/report.py`）
+  与次优差异未达显著时仍写「最优模型：xgb」，`compliance.json` 同时报违规。
+  现在只有「配对 bootstrap 显著、且 BH 校正后仍显著」才配写「最优模型」，
+  其余写「排序第一的模型（未过显著性，不构成「最优」）」。
+
+- **D10 置换检验与性能表两种口径并列却不标**（`sml/report.py`、`report_html.py`）
+  抗噪声检验的观测值是**池化 OOF** 指标，与上文折均值不是同一个数（本项目
+  折均值 0.083 vs 池化 0.2538）。该句现在显式标注口径。
+
+- **D3 单位缺失与单位误挂**（`sml/report.py`、`sml/present.py`）
+  md 报告 T2 表头完全没有单位（html 却有徽标），作者抄 md 就丢量纲。
+  表头现按字段规格 + `data.target_unit` 带单位，未填时显式写「单位未指定」。
+  另：ΔR² 系列（`delta_mean/sd/min/max`）被当成 `delta` 的 `unit=None` 处理，
+  给一个**无量纲量**挂了「单位未指定」徽标；现单独注册 `delta_r2`（`unit=""`）。
+
+### 修复（会误导流程的）
+
+- **D5 `--dry-run` 污染当前目录**：不传 `--out` 时按 `runs/<时间戳>_<数据名>`
+  建出整套骨架（`config.resolved.json`/`provenance.json`/`audit/` + 10 个空 stage 目录），
+  一条「只看审计」的命令在用户工作目录留下半套 run。现在落系统临时目录并打印路径；
+  dry-run 也只建 `audit/`。
+
+- **D7 dry-run 的 stage 列表不按 `enabled` 过滤**：配置里 perm/ad/interp 全
+  `false` 仍打印「将执行 6 个」，估时也照算。现按 `*.enabled` 过滤并单列被跳过的 stage。
+
+- **D12 总拟合次数口径不一致**：dry-run 表格合计 8775，报告写「总拟合次数 8900」，
+  差 125 = 每折用最优超参的最终重拟合。`estimate_fit_calls` 现把它计入
+  （并分列 `search_fit_calls` / `refit_fit_calls`），报告与 html 注明口径。
+
+- **D8 估时偏小 4.1×**：dry-run 把「纯拟合下限」当作预计总时长（本项目
+  5.0 min/目标 vs 实测 20.8）。现按「下限 – 4× 上限」区间报，并说明上限含
+  折间调度、预处理重建、绘图与报告。
+
+- **D6 死字段 `_n_iter_budget`**：`config.py` 写入、全仓无人读，
+  却出现在 `config.resolved.json` 里，让人误以为调参预算被记录。已删除。
+
+### 验证（本项目数据，v1.2.1 → v1.2.2）
+
+- `selfcheck.py` 53/53 通过。
+- 用 1.2.2 重跑 B 套 `--stages cv,ad,report`（100+ 行 / 100+ 组，两个目标）：
+  `cv/metrics_ci.csv`、`cv/oof_predictions.csv` **逐字节相同**；`cv/metrics_summary.csv`
+  的 34 列中除 `rank`（唯一有意变更）与 `rmse_gap_to_best→r2_gap_to_best` 改名外，
+  **逐格零差异**。两个目标的最优模型均与 1.2.1 相同。
+- `report/compliance.json` 的 `best_claim` 违规由 2 条降为 **0 条**。
+- `--dry-run`：拟合合计 8,775 → **8,900**（与报告一致）；估时由单值 5.0 min
+  → **区间 5.0–20.1 min**（实测 20.8）；A 配置打印「跳过 interp, perm, ad」；
+  当前目录**零残留**。
+
+### 未改（留待方法学裁决）
+
+- 置换检验的范围、AD 投票规则（`ad_voting` 的多数票定义）未动。
+- 同一 `--out` 混用两套配置仍报 `E-CFG-030`。
+
 ## [1.2.1] - 2026-11-25
 
 修 1.2.0 遗留的杠杆阈值口径问题。**一个 run 里曾同时出现两个 h\*（0.15 与 0.45），

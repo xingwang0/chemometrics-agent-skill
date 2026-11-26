@@ -165,8 +165,11 @@ def prepare(args: argparse.Namespace) -> RunContext:
 
         out = f"runs/{time.strftime('%Y%m%d_%H%M%S')}_{Path(str(ds.source_path)).stem}"
     run_dir = ensure_dir(out)
-    for sub in SUBDIRS:
-        ensure_dir(run_dir / sub)
+    # dry-run 只需要 audit/ 一个目录；把 10 个 stage 子目录一起建出来，等于让一条
+    # "只看审计"的命令留下半套空 run 骨架，--resume 时还会被误认为已有产物。
+    if not getattr(args, "dry_run", False):
+        for sub in SUBDIRS:
+            ensure_dir(run_dir / sub)
 
     from .config import dump_resolved
 

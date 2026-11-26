@@ -42,8 +42,15 @@ METRIC_LABELS_EN = {
 }
 
 
-def ad_conclusion_en(eff: Any, task: str = "regression") -> str:
+def ad_conclusion_en(eff: Any, task: str = "regression", verdict: str | None = None) -> str:
     what = "misclassification rate" if task == "classification" else "prediction error"
+    # 「方向相反」不能落进「无显著差异」那句：审稿人会以为只是检验没力，
+    # 而实际结论是"AD 挑出的样品反而更好预测"，英文 Methods 必须单独成句。
+    if verdict == "reversed":
+        return (f"Specimens flagged as out-of-domain actually showed a *lower* {what} than "
+                f"in-domain specimens, i.e. the domain criterion pointed in the opposite "
+                f"direction to the one expected; it therefore cannot be used to screen "
+                f"unreliable predictions.")
     if eff is True:
         return (f"Out-of-domain specimens showed a significantly higher {what} than in-domain "
                 f"specimens, indicating that the domain definition identified the less reliable "
@@ -52,6 +59,94 @@ def ad_conclusion_en(eff: Any, task: str = "regression") -> str:
         return (f"The {what} inside and outside the domain did not differ significantly, so the "
                 f"present domain criterion did not isolate the less reliable predictions.")
     return ("Too few specimens fell inside or outside the domain to test its validity statistically.")
+
+
+def ad_verdict_summary(ad_eval: dict | None) -> dict:
+    """把 ``per_model`` 的 AD 判定汇总成三态结论，供 Methods / limitations / 审稿清单共用。
+
+    为什么必须有这一层：旧实现这三处都取 ``next(iter(per_model.values()))``，也就是
+    **第一个模型**的结论。当各模型判定不一致时（真实数据上出现过：1 个 effective +
+    4 个 no_difference），报告正文用汇总 conclusion 写「各模型不一致」，而 Methods
+    与 limitations 写「无显著差异」——同一份交付物自相矛盾，作者照抄 Methods 就会
+    把唯一那条有效结论丢掉（或反过来把无效写成有效，取决于第一个模型是哪个）。
+    """
+    per = (ad_eval or {}).get("per_model") or {}
+    if not per:
+        return {"available": False, "state": "none", "n": 0}
+    verdicts = {str(m): (d or {}).get("ad_verdict") for m, d in per.items()}
+    eff = sorted(m for m, v in verdicts.items() if v == "effective")
+    no = sorted(m for m, v in verdicts.items() if v == "no_difference")
+    rev = sorted(m for m, v in verdicts.items() if v == "reversed")
+    con = sorted(m for m, v in verdicts.items() if v == "conflict")
+    n = len(verdicts)
+    tested = len(eff) + len(no) + len(rev) + len(con)
+    if len(eff) == n:
+        state = "all_effective"
+    elif tested == 0:
+        state = "untested"
+    elif not eff and not rev and not con and len(no) == n:
+        state = "none_effective"
+    elif not eff and not rev and len(con) == n:
+        state = "all_conflict"
+    else:
+        state = "mixed"
+    return {"available": True, "state": state, "n": n, "effective": eff,
+            "no_difference": no, "reversed": rev, "conflict": con}
+
+
+def ad_conclusion_summary_zh(sm: dict, task: str = "regression") -> str:
+    what = "误分类率" if task == "classification" else "预测误差"
+    state = sm.get("state")
+    if state == "untested":
+        return "域内或域外样品数量不足，未对适用域判据的有效性作统计检验。"
+    if state == "all_effective":
+        return (f"域外样品的{what}显著高于域内样品（按独立样品聚合的秩检验），"
+                f"表明在当前特征空间下定义的适用域能够识别出可靠性较低的预测。")
+    if state == "none_effective":
+        return f"域内与域外样品的{what}无显著差异，当前适用域判据未能区分出可靠性较低的预测。"
+    if state == "all_conflict":
+        return ("适用域有效性检验在各模型上均出现口径冲突（秩方向与均值方向相反），"
+                "无法据此宣称该判据能筛出低可靠预测。")
+    # mixed：必须点名，不能概称「有效」也不能概称「无效」
+    parts = [f"{len(sm['effective'])} 个（{'、'.join(sm['effective'])}）显示域外{what}显著更高",
+             f"{len(sm['no_difference'])} 个（{'、'.join(sm['no_difference'])}）无显著差异"]
+    if sm["reversed"]:
+        parts.append(f"{len(sm['reversed'])} 个（{'、'.join(sm['reversed'])}）方向相反")
+    if sm["conflict"]:
+        parts.append(f"{len(sm['conflict'])} 个（{'、'.join(sm['conflict'])}）口径冲突")
+    return (f"适用域有效性在各模型间**不一致**：{sm['n']} 个模型中，" + "；".join(parts)
+            + "；因此不将适用域作为统一的域外筛选依据。")
+
+
+def ad_conclusion_summary_en(sm: dict, task: str = "regression") -> str:
+    what = "misclassification rate" if task == "classification" else "prediction error"
+    state = sm.get("state")
+    if state == "untested":
+        return ("Too few specimens fell inside or outside the domain to test its validity "
+                "statistically.")
+    if state == "all_effective":
+        return (f"Out-of-domain specimens showed a significantly higher {what} than in-domain "
+                f"specimens (rank test on per-specimen aggregates), indicating that the domain "
+                f"definition identified the less reliable predictions.")
+    if state == "none_effective":
+        return (f"The {what} inside and outside the domain did not differ significantly, so the "
+                f"present domain criterion did not isolate the less reliable predictions.")
+    if state == "all_conflict":
+        return ("The domain validity test was inconclusive for every model (the rank-based and "
+                "mean-based directions disagreed), so no claim is made that the criterion "
+                "screens out unreliable predictions.")
+    parts = [f"{len(sm['effective'])} ({', '.join(sm['effective'])}) showed a significantly higher "
+             f"out-of-domain {what}",
+             f"{len(sm['no_difference'])} ({', '.join(sm['no_difference'])}) showed no significant "
+             f"difference"]
+    if sm["reversed"]:
+        parts.append(f"{len(sm['reversed'])} ({', '.join(sm['reversed'])}) pointed in the opposite "
+                     f"direction")
+    if sm["conflict"]:
+        parts.append(f"{len(sm['conflict'])} ({', '.join(sm['conflict'])}) were inconclusive")
+    return ("Domain validity was **inconsistent across models**: of "
+            f"{sm['n']} models, " + "; ".join(parts)
+            + "; the domain criterion is therefore not used as a uniform out-of-domain filter.")
 
 
 # --------------------------------------------------------------------------- #
@@ -82,6 +177,29 @@ def _fmt(v: Any, digits: int = 4) -> str:
     report.md 与 tables/*.csv 逐字节不变，再逐处换成带字段语义的 ``present.fmt``。
     """
     return present.fmt_legacy(v, digits)
+
+
+def _fmt_p(v: Any) -> str:
+    """p 值专用渲染：3 位小数 + ``p<0.001`` / ``p>0.999`` 用不等号。
+
+    旧实现让 p 走 ``_fmt(v, 4)``，于是同一份 run 的 HTML 写 ``< 0.001``、md 写
+    ``0.0005``；置换 p 还有硬下限 ``1/(1+n_perm)``，写 ``0.0000`` 本身就是错的。
+    """
+    return present.fmt_p(v)
+
+
+def _real_outer_folds(ds, cfg: dict) -> int:
+    """报告里写的折数必须是**实际会跑**的折数（loo_batch=批次数、holdout=1）。"""
+    from .cv import _outer_fold_count
+
+    return int(_outer_fold_count(ds, cfg))
+
+
+def _real_repeats(cfg: dict) -> int:
+    """重复次数取有效值：loo_batch / holdout_batch 下会被降为 1。"""
+    from .cv import effective_repeats
+
+    return int(effective_repeats(cfg))
 
 
 # --------------------------------------------------------------------------- #
@@ -194,8 +312,15 @@ def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
                 row["域内RMSE"] = present.fmt("rmse", (ev.get("metrics_inside") or {}).get("rmse"))
                 row["域外RMSE"] = present.fmt("rmse", (ev.get("metrics_outside") or {}).get("rmse"))
             row["有效性检验 p"] = present.fmt_p(ev.get("mannwhitney_p", ev.get("fisher_p")))
-            row["AD 是否有效"] = {True: "是", False: "否", None: "无法判定"}.get(
-                ev.get("ad_effective"), "—")
+            # 三态必须分开写：把「方向相反」压成「否」，读者会以为只是不显著，
+            # 而它其实是"AD 判据选出的样品反而更好预测"，是完全不同的结论。
+            verdict = ev.get("ad_verdict")
+            row["AD 是否有效"] = {
+                "effective": "是",
+                "reversed": "否（方向相反：域外误差反而更小）",
+                "no_difference": "否（无显著差异）",
+                "conflict": "无法判定（秩方向与均值方向相反）",
+            }.get(str(verdict), {True: "是", False: "否"}.get(ev.get("ad_effective"), "无法判定"))
             rows.append(row)
         if rows:
             tables["T5_applicability_domain"] = pd.DataFrame(rows)
@@ -336,12 +461,12 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
         f"Y-randomization 置换检验（n={perm.get('n_perm')}，样品级置换）得到零分布，"
         f"观测 {METRIC_LABELS.get(str(perm.get('metric')), perm.get('metric'))}="
         f"{_fmt(perm.get('observed'), 4)}，"
-        f"p={_fmt(perm.get('p_value'), 4)}")
+        f"p={_fmt_p(perm.get('p_value'))}")
     perm_text_en = "was not performed" if not perm or perm.get("error") else (
         f"(n = {perm.get('n_perm')} permutations of the response at the sample level) yielded a null "
         f"distribution against which the observed "
         f"{METRIC_LABELS_EN.get(str(perm.get('metric')), perm.get('metric'))} = "
-        f"{_fmt(perm.get('observed'), 4)} gave p = {_fmt(perm.get('p_value'), 4)}")
+        f"{_fmt(perm.get('observed'), 4)} gave p = {_fmt_p(perm.get('p_value'))}")
 
     # 置换段的两句改写：模式必须如实写（fast 是固定超参，不是「重跑整个流程」），
     # 结论必须按 p 值分支——旧模板无条件写「超出随机水平」，p>0.05 时与正文自相矛盾。
@@ -401,16 +526,19 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
                        if "leverage" in acts else "")
         lev_note_en = ("; leverage used max(3(k+1)/n, the same percentile) with n = number of "
                        "fitted spectra" if "leverage" in acts else "")
+        # 结论句必须用**汇总**口径：逐模型结论在「各模型不一致」时不能代表整份研究，
+        # 拿第一个模型的那句会让 Methods 与正文互相矛盾（见 ad_verdict_summary）。
+        ad_sm = ad_verdict_summary(ad_eval)
         ad_text = (f"以 {len(acts)} 种方法联合判定适用域（{act_txt}；阈值取训练集 {quant}% 经验分位"
                    f"{lev_note_zh}，"
                    f"任一方法越界即判为域外{deg_txt_zh}），{unit}。"
-                   f"{first.get('conclusion', '')}")
+                   f"{ad_conclusion_summary_zh(ad_sm, ds.task)}")
         ad_text_en = (f"The applicability domain was defined jointly by {len(acts)} method(s) "
                       f"({act_txt.replace('、', ', ')}) with thresholds taken as the {quant}th percentile "
                       f"of the training data{lev_note_en} (a specimen was flagged if any single method "
                       f"exceeded its threshold{deg_txt_en}); {unit_en}. "
                       f"Repeated measurements of the same specimen were not counted separately. "
-                      f"{ad_conclusion_en(first.get('ad_effective'), ds.task)}")
+                      f"{ad_conclusion_summary_en(ad_sm, ds.task)}")
 
     from .provenance import package_versions
 
@@ -443,31 +571,31 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
         sig_zh = (f"；但其与 **{sig['runner_up']}** 的差异经多重比较校正后未达显著"
                   f"（单次比较的配对 bootstrap 差值（池化折外预测口径）95% CI "
                   f"[{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}] 不含 0，"
-                  f"但 BH 校正（家族 m = {m if m is not None else '?'}）后 p = {_fmt(sig['p_bh'], 4)}"
+                  f"但 BH 校正（家族 m = {m if m is not None else '?'}）后 p = {_fmt_p(sig['p_bh'])}"
                   f" > {_fmt(sig.get('alpha', 0.05), 2)}），论文中应写「{best_model} 略优但未确立」，"
                   f"不要写成显著优于 **{sig['runner_up']}**")
         sig_en = (f"; however, the difference from **{sig['runner_up']}** did not survive "
                   f"multiple-comparison correction (single-comparison 95% CI "
                   f"[{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}] excluded zero, but the "
-                  f"BH-adjusted p was {_fmt(sig['p_bh'], 4)} > {_fmt(sig.get('alpha', 0.05), 2)} "
+                  f"BH-adjusted p was {_fmt_p(sig['p_bh'])} > {_fmt(sig.get('alpha', 0.05), 2)} "
                   f"over a family of m = {m if m is not None else '?'}), so the two models should "
                   f"be described as comparable rather than significantly different")
     elif sig.get("available") and not sig.get("significant"):
         sig_zh = (f"；但其与 **{sig['runner_up']}** 的差异未达统计显著"
                   f"（配对 bootstrap 差值（池化折外预测口径）95% CI [{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}]，"
-                  f"BH 校正 p = {_fmt(sig['p_bh'], 4)}），故二者应视为性能相当")
+                  f"BH 校正 p = {_fmt_p(sig['p_bh'])}），故二者应视为性能相当")
         sig_en = (f"; however, its difference from **{sig['runner_up']}** was not statistically "
                   f"significant (paired bootstrap 95% CI [{_fmt(sig['ci_low'], 4)}, "
-                  f"{_fmt(sig['ci_high'], 4)}], BH-adjusted p = {_fmt(sig['p_bh'], 4)}), "
+                  f"{_fmt(sig['ci_high'], 4)}], BH-adjusted p = {_fmt_p(sig['p_bh'])}), "
                   f"so the two models should be regarded as performing equivalently")
     elif sig.get("available") and sig.get("significant"):
         sig_zh = (f"；该模型显著优于次优 **{sig['runner_up']}**"
                   f"（配对 bootstrap 差值（池化折外预测口径）95% CI [{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}]，"
-                  f"BH 校正 p = {_fmt(sig['p_bh'], 4)}）")
+                  f"BH 校正 p = {_fmt_p(sig['p_bh'])}）")
         sig_en = (f"; this model was significantly better than the runner-up "
                   f"**{sig['runner_up']}** (paired bootstrap 95% CI "
                   f"[{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}], "
-                  f"BH-adjusted p = {_fmt(sig['p_bh'], 4)})")
+                  f"BH-adjusted p = {_fmt_p(sig['p_bh'])})")
     else:
         sig_zh = sig_en = ""
     if ds.task == "regression":
@@ -508,9 +636,12 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
                          if reps_max > 1 else "a single measurement per specimen"),
         "range_text": range_text,
         "prep_text": "、".join(preps),
-        "k_out": cfg["split"]["outer"]["n_splits"],
+        # 折数与重复次数必须用**实际执行值**：loo_batch 下 repeats 会被降为 1、
+        # 外层折数等于批次数。直接用 cfg 原值会写出「重复 5 次不同随机种子」这种
+        # 用一次复现实验就能否证的方法学陈述。
+        "k_out": _real_outer_folds(ds, cfg),
         "k_in": cfg["split"]["inner"]["n_splits"],
-        "n_repeats": cfg["split"]["repeats"],
+        "n_repeats": _real_repeats(cfg),
         "seed": cfg["runtime"]["seed"],
         "models_text": "、".join(models),
         "best_model": best_model,
@@ -573,7 +704,7 @@ def _comparison_status(block: dict, comp_ok: bool) -> str:
     sig = block.get("significance") or {}
     if not sig.get("available"):
         return f"⚠ 未能比较：{sig.get('reason', '缺少结果')}"
-    p = _fmt(sig.get("p_bh"), 4)
+    p = _fmt_p(sig.get("p_bh"))
     if sig.get("significant"):
         return f"✓ 最优显著优于 {sig['runner_up']}（BH 校正 p = {p}）"
     return (f"⚠ 最优与 {sig['runner_up']} 无显著差异（BH 校正 p = {p}）："
@@ -595,10 +726,18 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
     has_replicate = (ds.groups_per_sample().max() > 1)
     has_batch = ds.batch is not None
     perm_ok = bool(perm.get("significant")) if perm else False
-    ad_eff = None
+    ad_status = "⚠ 未执行"
     if ad_eval and ad_eval.get("per_model"):
-        first = next(iter(ad_eval["per_model"].values()))
-        ad_eff = first.get("ad_effective")
+        # 清单里的「AD 是否有效」也必须用汇总口径：第一个模型有效/无效都不能代表全部。
+        _sm = ad_verdict_summary(ad_eval)
+        ad_status = {
+            "all_effective": f"✓ 且已验证有效（{_sm['n']} 个模型全部显示域外误差显著更高）",
+            "none_effective": "⚠ AD 未能识别域外，不得宣称可外推",
+            "mixed": (f"⚠ 各模型不一致（{len(_sm['effective'])}/{_sm['n']} 个有效："
+                      f"{'、'.join(_sm['effective']) or '无'}），不得概称 AD 有效"),
+            "all_conflict": "⚠ 口径冲突，无法判定",
+            "untested": "⚠ 无法验证（域内或域外样品不足）",
+        }.get(_sm["state"], "⚠ 无法验证")
     comp_ok = not comp.empty
     best_r2 = block.get("r2")
     rpd = block.get("rpd")
@@ -631,7 +770,7 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
         ("新样品能用吗？外推范围在哪？",
          "四法适用域（T²/Q/kNN/leverage）+ 域内外性能检验",
          "ad/ad_scores.csv、figures/F4_williams.png",
-         {True: "✓ 且已验证有效", False: "⚠ AD 未能识别域外，不得宣称可外推", None: "⚠ 无法验证"}.get(ad_eff, "⚠ 未执行")),
+         ad_status),
         ("性能指标有没有不确定度？",
          "按样品（cluster）bootstrap 的 95% 置信区间",
          "cv/metrics_ci.csv", "✓"),
@@ -680,7 +819,8 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
             kind = str(vals.iloc[0]) if len(vals) else "native"
         if kind == "native":
             rows.append(("概率可信吗？阈值怎么定的？",
-                         "校准曲线 + Brier + Brier Skill；阈值用内层 CV 的 Youden 点，不在测试折上调",
+                         "校准曲线 + Brier + Brier Skill；分类阈值固定 0.5"
+                         "（本管线未实现 Youden 阈值选择，勿在 Methods 里写用了 Youden 点）",
                          "figures/F5_calibration.png", "✓"))
         else:
             rows.append(("概率可信吗？阈值怎么定的？",
@@ -717,31 +857,40 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
 
 # --------------------------------------------------------------------------- #
 def _best_model_line(block: dict, best_model: str) -> str:
-    """「最优模型」这句话必须带显著性结论，否则等于给出数据不支持的排序。"""
+    """「最优模型」这句话必须带显著性结论，否则等于给出数据不支持的排序。
+
+    措辞按证据分级：只有「配对 bootstrap 显著且 BH 校正后仍显著」才配写「最优模型」；
+    其余情形一律写「排序第一的模型」，并在同一句里说清为什么不能叫最优——
+    否则正文会一边写「最优模型：xgb」、一边写「与次优无显著差异」，自相矛盾。
+    """
     sig = block.get("significance") or {}
     label = METRIC_LABELS.get(sig.get("metric", ""), sig.get("metric", "主指标"))
     # 差值来自 comparison.csv，一律按池化折外预测计算；正文主指标是折均值。
     # 同一句里两种口径混着出现时必须写明，否则读者会把 0.18 和表里的 0.29 对不上。
     basis_tag = "，差值口径=池化折外预测"
+    established = bool(sig.get("available") and sig.get("significant")
+                       and not sig.get("bh_conflict"))
+    head = ("最优模型" if established
+            else "排序第一的模型（未过显著性，不可宣称优于其它模型）")
     if sig.get("available") and sig.get("bh_conflict"):
         m = sig.get("m_family")
-        return (f"- 最优模型：**{best_model}**（单次比较的 {label} 差 {_fmt(sig['delta'], 4)}"
+        return (f"- {head}：**{best_model}**（单次比较的 {label} 差 {_fmt(sig['delta'], 4)}"
                 f"{basis_tag}，95% CI [{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}] 不含 0，"
-                f"但 BH 校正（家族 m = {m if m is not None else '?'}）后 p = {_fmt(sig['p_bh'], 4)}，"
+                f"但 BH 校正（家族 m = {m if m is not None else '?'}）后 p = {_fmt_p(sig['p_bh'])}，"
                 f"未过 α = {_fmt(sig.get('alpha', 0.05), 2)}）→ 论文写「{best_model} 略优但未确立」，"
                 f"不要写成显著优于 `{sig['runner_up']}`。")
     if sig.get("available") and sig.get("significant"):
-        return (f"- 最优模型：**{best_model}**（显著优于次优 `{sig['runner_up']}`："
+        return (f"- {head}：**{best_model}**（显著优于次优 `{sig['runner_up']}`："
                 f"{label} 差 {_fmt(sig['delta'], 4)}{basis_tag}，95% CI "
                 f"[{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}]，"
-                f"BH 校正 p = {_fmt(sig['p_bh'], 4)}）")
+                f"BH 校正 p = {_fmt_p(sig['p_bh'])}）")
     if sig.get("available"):
-        return (f"- 最优模型：**{best_model}**，但**与 `{sig['runner_up']}` 的差异未达显著**"
+        return (f"- {head}：**{best_model}**，但**与 `{sig['runner_up']}` 的差异未达显著**"
                 f"（{label} 差 {_fmt(sig['delta'], 4)}{basis_tag}，95% CI "
                 f"[{_fmt(sig['ci_low'], 4)}, {_fmt(sig['ci_high'], 4)}]，"
-                f"BH 校正 p = {_fmt(sig['p_bh'], 4)}）→ 论文中应写"
+                f"BH 校正 p = {_fmt_p(sig['p_bh'])}）→ 论文中应写"
                 f"「{best_model} 与 {sig['runner_up']} 性能相当」，不要只推荐前者。")
-    return (f"- 最优模型：**{best_model}**（未做显著性检验："
+    return (f"- {head}：**{best_model}**（未做显著性检验："
             f"{sig.get('reason', '缺少对比结果')}；不要据此宣称它优于其它模型）")
 
 
@@ -768,9 +917,18 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     if ds.n_groups < 30:
         lim.append(f"独立样品仅 {ds.n_groups} 个，性能估计的置信区间较宽，不宜据此宣称模型已定型。")
     if ad_eval and ad_eval.get("per_model"):
-        first = next(iter(ad_eval["per_model"].values()))
-        if first.get("ad_effective") is False:
-            _what = "误分类率" if ds.task == "classification" else "预测误差"
+        # 与 Methods 同一把尺子（见 ad_verdict_summary）：各模型不一致时，
+        # 不能拿第一个模型的结论代表全部，否则 limitations 会与正文互相打脸。
+        _sm_lim = ad_verdict_summary(ad_eval)
+        _what = "误分类率" if ds.task == "classification" else "预测误差"
+        if _sm_lim["state"] == "mixed":
+            lim.append(ad_conclusion_summary_zh(_sm_lim, ds.task)
+                       + "单一模型的结论不得推广到其它模型；论文引用 AD 时须逐模型说明。")
+        elif _sm_lim["state"] == "all_conflict":
+            lim.append("适用域有效性检验在各模型上均出现口径冲突（秩方向显示域外误差更高、"
+                       "均值方向相反）：本研究不宣称该判据能筛出低可靠预测，"
+                       "域外样品的外推可靠性无法结论。")
+        elif _sm_lim["state"] == "none_effective":
             lim.append(f"适用域检验显示域内与域外样品的{_what}无显著差异，"
                        "当前适用域判据未能识别出可靠性较低的预测；"
                        "因此本研究不对域外样品的外推可靠性作出结论。")
@@ -783,10 +941,10 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     _sig_lim = block.get("significance") or {}
     if _sig_lim.get("available") and not _sig_lim.get("significant"):
         _lab_lim = METRIC_LABELS.get(_sig_lim.get("metric", ""), _sig_lim.get("metric", "主指标"))
-        lim.append(f"最优模型 {best_model} 与次优 {_sig_lim['runner_up']} 的 {_lab_lim} "
+        lim.append(f"表现最好的模型 {best_model} 与次优 {_sig_lim['runner_up']} 的 {_lab_lim} "
                    f"差异未达统计显著（配对 bootstrap 差值 95% CI "
                    f"[{_fmt(_sig_lim['ci_low'], 4)}, {_fmt(_sig_lim['ci_high'], 4)}]，"
-                   f"BH 校正 p = {_fmt(_sig_lim['p_bh'], 4)}"
+                   f"BH 校正 p = {_fmt_p(_sig_lim['p_bh'])}"
                    # CI 不含 0 却没过 BH：分歧必须写清，否则同一条 limitation 自相矛盾
                    + ("；单次比较的 CI 不含 0，但多重比较校正后未过 α"
                       if _sig_lim.get("bh_conflict") else "")
@@ -877,7 +1035,13 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                 f"（R²={_fmt(top_pool['r2'], 3)}）。本报告按 `metric_basis` 选模；"
                 f"论文里引用的数字必须与所选口径一致，不能混引。")
     if perm and not perm.get("error"):
-        lines.append(f"- 抗噪声检验：{perm.get('conclusion')}")
+        # 置换检验的观测值是**池化 OOF** 指标（零分布必须与它同口径），
+        # 而上文性能表给的是折均值。两个数并列时不言明口径，读者会以为报告自相矛盾。
+        _pm = METRIC_LABELS.get(str(perm.get("metric")), perm.get("metric"))
+        _basis = ("（观测值口径=池化折外预测，与上文折均值不是同一个数）"
+                  if str(perm.get("metric")) in ("r2", "rmse", "mae") else "")
+        lines.append(f"- 抗噪声检验：观测 {_pm} = {_fmt(perm.get('observed'), 4)}{_basis}；"
+                     f"{perm.get('conclusion')}")
     if ad_eval and ad_eval.get("conclusion"):
         _n_out, _n_g = ad_eval.get("n_outside_groups_any"), ad_eval.get("n_groups")
         _rate = ad_eval.get("flag_rate_any_groups")
@@ -920,7 +1084,8 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     lines.append(f"- 外层：{cfg['split']['outer']['n_splits']} 折分组 CV × 重复 {cfg['split']['repeats']} 次（不同种子）")
     lines.append(f"- 内层：{cfg['split']['inner']['n_splits']} 折分组 CV 用于调参与预处理选择")
     lines.append(f"- 模型：{', '.join(summary['model'].tolist()) if not summary.empty else best_model}")
-    lines.append(f"- 总拟合次数：{plan.get('total_fit_calls', '—')}")
+    lines.append(f"- 总拟合次数：{plan.get('total_fit_calls', '—')}"
+                 "（内层候选搜索 + 每折用最优超参的最终重拟合；不含置换检验的重复拟合）")
     lines.append("")
     lines.append("> 聚合口径：先按 repeat 求折均值，再对 repeat 求 mean±sd。"
                  "把 R×k 个折混在一起算 sd 属于伪重复，会低估方差。")
@@ -942,10 +1107,33 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                     show.append(m)
         t = summary[show].copy()
         labels = {"r2": "r2 (池化)", "rmse": "rmse (池化)"}
-        head = [labels.get(c, str(c).replace("_mean", "").replace("_sd", " (sd)")) for c in t.columns]
+        tunit = getattr(ds, "target_unit", None)
+
+        def _head(c) -> str:
+            """表头带单位。
+
+            旧版 md 表头只把 ``_mean/_sd`` 裁成文字，量纲列（RMSE/MAE）于是裸着进论文——
+            同一份报告 html 有单位徽标、md 全篇 0 次单位，作者抄 md 就丢单位。
+            无量纲列（R²/RPD/排名）不加后缀；有量纲而 target_unit 未填时显式写
+            「单位未指定」，逼作者回去补 config，而不是静默省略。
+            """
+            base = labels.get(c) or str(c).replace("_mean", "").replace("_sd", " (sd)")
+            spec = present.spec_for_column(c)
+            if spec is None:
+                return base
+            unit = spec.unit if spec.unit is not None else tunit
+            suf = present.unit_suffix(unit, "md")
+            return f"{base} ({suf})" if suf else base
+
+        head = [_head(c) for c in t.columns]
 
         def _cell(col, val, idx):
             if isinstance(val, (int, float, np.floating)):
+                # 精度按字段裁决（R² 3 位、RPD 2 位、RMSE 4 位有效数字），不再一律 3 位：
+                # 同一数字在 §一 正文是 0.1234、在 T2 却是 0.123，读者对不上账。
+                spec = present.spec_for_column(col)
+                if spec is not None:
+                    return present.fmt(spec.id, val)
                 return _fmt(val, 3)
             text = str(val)
             if col == "model" and bool(pooled_rows.get(idx, False)):
@@ -989,7 +1177,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
             _m = _sig.get("m_family")
             lines.append(f"> **显著性提醒**：`{best_model}` 与 `{_sig['runner_up']}` 的 {_lab} 差值"
                          f" 95% CI 为 [{_fmt(_sig['ci_low'], 4)}, {_fmt(_sig['ci_high'], 4)}]（**不含 0**），"
-                         f"但 BH 校正（家族 m = {_m if _m is not None else '?'}）后 p = {_fmt(_sig['p_bh'], 4)}，"
+                         f"但 BH 校正（家族 m = {_m if _m is not None else '?'}）后 p = {_fmt_p(_sig['p_bh'])}，"
                          f"未过 α = {_fmt(_sig.get('alpha', 0.05), 2)}——两套判据分歧。"
                          f"本表不支持「{best_model} 唯一最优」的排序；论文中应写"
                          f"「{best_model} 略优于 {_sig['runner_up']}，但经多重比较校正后差异未确立」，"
@@ -999,7 +1187,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
             _lab = METRIC_LABELS.get(_sig.get("metric", ""), _sig.get("metric", "主指标"))
             lines.append(f"> **显著性提醒**：`{best_model}` 与 `{_sig['runner_up']}` 的 {_lab} 差值"
                          f" 95% CI 为 [{_fmt(_sig['ci_low'], 4)}, {_fmt(_sig['ci_high'], 4)}]（跨 0），"
-                         f"BH 校正 p = {_fmt(_sig['p_bh'], 4)}。本表不支持「{best_model} 唯一最优」的排序；"
+                         f"BH 校正 p = {_fmt_p(_sig['p_bh'])}。本表不支持「{best_model} 唯一最优」的排序；"
                          f"论文中应写「二者性能相当」，配对比较见 `cv/comparison.csv`（表 T4）。")
             lines.append("")
     figs_present = sorted(figures.keys())
@@ -1018,7 +1206,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
         for _, r in sub.head(15).iterrows():
             lines.append(f"| {r.get('model_a')} | {r.get('model_b')} | {r.get('metric')} | "
                          f"{_fmt(r.get('delta'), 4)} | [{_fmt(r.get('ci_low'))}, {_fmt(r.get('ci_high'))}] | "
-                         f"{_fmt(r.get('p_raw'), 4)} | {_fmt(r.get('p_BH'), 4)} | {r.get('better', '—')} |")
+                         f"{_fmt_p(r.get('p_raw'))} | {_fmt_p(r.get('p_BH'))} | {r.get('better', '—')} |")
         lines.append("")
         lines.append(f"> 多重比较家族大小 m = {int(comp['p_BH'].notna().sum()) if 'p_BH' in comp else '—'}；"
                      "只报原始 p 会高估显著性。")
@@ -1031,7 +1219,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     if perm and not perm.get("error"):
         lines.append(f"- 零分布：均值 {_fmt(perm.get('null_mean'), 4)}，"
                      f"95% 区间 [{_fmt(perm.get('null_q025'), 4)}, {_fmt(perm.get('null_q975'), 4)}]")
-        lines.append(f"- 观测值：{_fmt(perm.get('observed'), 4)}；p = {_fmt(perm.get('p_value'), 4)}"
+        lines.append(f"- 观测值：{_fmt(perm.get('observed'), 4)}；p = {_fmt_p(perm.get('p_value'))}"
                      f"（n_perm={perm.get('n_perm')}）")
         lines.append(f"- 结论：{perm.get('conclusion')}")
     else:

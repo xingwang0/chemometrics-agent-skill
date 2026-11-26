@@ -178,10 +178,23 @@ def predict_frame(run_dir: str | Path, df: pd.DataFrame, use_ad: bool = True) ->
     if use_ad:
         ad_path = Path(run_dir) / "ad" / "ad_model.joblib"
         if ad_path.exists():
-            try:
-                import joblib
+            import joblib
 
-                ad = joblib.load(ad_path)
+            from .ad import AD_SCHEMA_VERSION, ad_model_version
+
+            ad = joblib.load(ad_path)
+            ver = ad_model_version(ad)
+            if ver < AD_SCHEMA_VERSION:
+                # 显式失败，不降级：旧模型缺训练参考集，判域会近乎把所有样品判成域外，
+                # 而 predictions.csv 看起来完全正常——这种"静默错误"必须在这里挡住。
+                raise ConfigError(
+                    "E-PRED-006",
+                    f"{ad_path} 的结构版本为 {ver or '未知（旧版 skill 生成）'}，"
+                    f"低于当前要求 {AD_SCHEMA_VERSION}：该模型没有训练得分矩阵，"
+                    "杠杆判域会把待判样品自己当参考集，ad_flag 会近乎恒为 1（全部判为域外）。\n"
+                    f"  - 重建 AD 模型：run_pipeline.py --run-dir {run_dir} --stages ad,report\n"
+                    "  - 或本次不判域：--no-ad")
+            try:
                 sc = ad.score(X)
                 out["ad_flag"] = sc["ad_flag"].to_numpy()
                 out["ad_votes"] = sc["ad_votes"].to_numpy()

@@ -175,7 +175,7 @@ _s("n_folds_degenerate", "退化折数", "degenerate folds", kind="count", prec=
 _s("n_perm", "置换次数", "permutations", kind="count", prec=_INT, unit="")
 _s("n_boot", "bootstrap 次数", "bootstrap resamples", kind="count", prec=_INT, unit="")
 _s("n_repeats", "重复次数", "repetitions", kind="count", prec=_INT, unit="")
-_s("rank", "排名", "rank", kind="count", prec=_INT, unit="", note="在目标内按 RMSE 排名")
+_s("rank", "排名", "rank", kind="count", prec=_INT, unit="", note="在目标内按选模主指标（回归 R²、分类 AUC）排名，与「最优模型」同口径")
 _s("n_inside", "域内样品", "in-domain", kind="count", prec=_INT, unit="")
 _s("n_outside", "域外样品", "out-of-domain", kind="count", prec=_INT, unit="")
 # 比例（存 0–1，显示 %）
@@ -186,6 +186,10 @@ _s("miss_rate", "失败折比例", "failed-fold share", kind="ratio", prec=_PCT,
 # 其他
 _s("delta", "差值", "difference", direction=0, prec=_D4, unit=None,
    note="成对差值；精度不得超过被比较的两个量本身的精度（ASTM E29）")
+# ΔR² 是 R² 的差值 → 无量纲。别让它落到 delta 的 unit=None（"作者没填"）分支，
+# 否则页面上会给一个本来就没有量纲的量挂「单位未指定」徽标，反而误导读者。
+_s("delta_r2", "ΔR²", "ΔR²", direction=0, prec=_D4, unit="",
+   note="R² 的差值，无量纲；正号表示该特征/波段退出后 R² 下降（越正越重要）")
 _s("threshold", "阈值", "threshold", direction=0, prec=_S4, unit=None)
 _s("pred_range_ratio", "预测范围比", "prediction range ratio", direction=0, prec=_D2,
    note="预测值极差 / 训练集目标极差；>>1 说明外推爆炸，不是比例，不能当百分比显示")
@@ -388,7 +392,13 @@ def fmt_legacy(v: Any, digits: int = 4) -> str:
         return str(v)
     if not math.isfinite(f):
         return MISSING
-    return f"{f:.{digits}f}"
+    # 负零归一：``f"{-0.0004:.3f}"`` 得到 ``-0.000``。报告里出现「-0.000」既难看又会被
+    # 读成"有负向效应"（bias / ΔR² 恰是最容易落到 -0.0004 的量）。
+    # 注意必须在**字符串**上判：``-0.0004 != 0``，只在数值上判 ``f == 0`` 拦不住舍入后的负零。
+    text = f"{f:.{digits}f}"
+    if text.startswith("-") and not text.lstrip("-").strip("0."):
+        text = text[1:]
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -403,6 +413,10 @@ _SUFFIXES: tuple[tuple[str, int], ...] = (
 def spec_for_column(col: Any) -> FieldSpec | None:
     """把 ``r2_mean`` / ``rmse_sd`` / ``rpd_ci_low`` 这类列名映射到规格。"""
     name = str(col)
+    # 先拦 ΔR² 系列：否则 "delta_mean" 会被下面的 _mean 后缀分支拆成 "delta"，
+    # 拿到 unit=None（作者没填），页面上就给一个无量纲的差值挂了「单位未指定」。
+    if name.lower().startswith("delta_"):
+        return SPECS["delta_r2"]
     spec = SPECS.get(name)
     extra = 0
     if spec is None:
@@ -424,6 +438,10 @@ def spec_for_column(col: Any) -> FieldSpec | None:
 
 def _spec_by_pattern(name: str) -> FieldSpec | None:
     low = name.lower()
+    # ΔR² 系列（delta_mean / delta_sd / delta_min / delta_max）只来自置换重要性表，
+    # 是 R² 的差值：无量纲，不能当"作者忘填单位"处理。
+    if low.startswith("delta_"):
+        return SPECS["delta_r2"]
     if low.startswith("p_") or low in {"p", "pvalue", "p_value"}:
         return SPECS["p_value"]
     if low in {"rank", "n", "n_train", "n_test"} or (

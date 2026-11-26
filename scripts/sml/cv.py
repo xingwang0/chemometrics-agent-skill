@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -31,7 +32,7 @@ from .metrics import prediction_range_check
 from .models import ModelSpec, build_pipeline, prep_label, search_space
 from .preprocess import prep_name
 from .tune import count_candidates, expand_space, inner_search, scoring_for
-from .utils import info, warn
+from .utils import info, parallel_pays_off, resolve_workers, warn
 
 __all__ = [
     "make_outer_splits", "make_inner_splits", "run_nested_cv",
@@ -67,6 +68,30 @@ def _check_group_count(n_groups: int, n_splits: int, label: str) -> int:
     return n_splits
 
 
+def _warn_if_samples_span_batches(splits, groups, strategy: str) -> None:
+    """留批次外推的前提是「测试批次的样品在训练折里一次都没出现」。
+
+    按 batch 切分并不自动保证这一点：同一样品跨批次复测（换仪器/换日期）时，
+    它的另一次测量会留在训练折里，于是被当作"跨批次外推"报出来的性能其实仍含
+    样品级泄漏——而这正是 ``loo_batch`` 被推荐为"审稿人最认的真外推"的理由。
+    这里只告警不改切分（改切分会静默减少样品，影响面比泄漏更难交代）。
+    """
+    spanning: set[str] = set()
+    for tr, te in splits:
+        g_tr, g_te = set(groups[tr]), set(groups[te])
+        spanning |= (g_tr & g_te)
+    if spanning:
+        key = (strategy, len(spanning))
+        if key not in _BATCH_SPAN_WARNED:
+            _BATCH_SPAN_WARNED.add(key)
+            warn(f"{strategy}：有 {len(spanning)} 个样品在训练折与测试折中都出现"
+                 f"（跨批次复测），这些样品的「跨批次」性能仍含样品级泄漏；"
+                 f"若论文要声称真外推，请改用剔除跨批样品的子集或按 (样品,批次) 复合键切分")
+
+
+_BATCH_SPAN_WARNED: set[tuple[str, int]] = set()
+
+
 def make_outer_splits(ds, cfg: dict, seed: int) -> list[tuple[np.ndarray, np.ndarray]]:
     strategy = cfg["split"]["strategy"]
     groups = np.asarray(ds.groups, dtype=object)
@@ -89,13 +114,16 @@ def make_outer_splits(ds, cfg: dict, seed: int) -> list[tuple[np.ndarray, np.nda
         if strategy == "loo_batch":
             n_batch = len(pd.unique(batch))
             _check_group_count(n_batch, n_batch, "留一批次")
-            return list(LeaveOneGroupOut().split(ds.X, ds.y, groups=batch))
-        target_batch = str(cfg["split"]["holdout_batch"])
-        te = np.flatnonzero(batch == target_batch)
-        tr = np.flatnonzero(batch != target_batch)
-        if te.size == 0 or tr.size == 0:
-            raise ConfigError("E-CV-003", f"holdout_batch={target_batch!r} 在数据中不存在或占满了全部数据")
-        return [(tr, te)]
+            splits = list(LeaveOneGroupOut().split(ds.X, ds.y, groups=batch))
+        else:
+            target_batch = str(cfg["split"]["holdout_batch"])
+            te = np.flatnonzero(batch == target_batch)
+            tr = np.flatnonzero(batch != target_batch)
+            if te.size == 0 or tr.size == 0:
+                raise ConfigError("E-CV-003", f"holdout_batch={target_batch!r} 在数据中不存在或占满了全部数据")
+            splits = [(tr, te)]
+        _warn_if_samples_span_batches(splits, groups, strategy)
+        return splits
 
     # nested_group
     n_splits = _check_group_count(n_groups, int(cfg["split"]["outer"]["n_splits"]), "外层分组")
@@ -201,9 +229,16 @@ def estimate_fit_calls(ds, cfg: dict, specs: list[ModelSpec]) -> dict[str, Any]:
     total = 0
     for spec in specs:
         c = _candidates_per_fold(spec, cfg, 0)
-        calls = repeats * total_outer * c * n_inner
+        # 每次「外层折 × 模型」实际发生两类拟合：
+        #   1) 内层搜索：候选 c 个 × 内层 n_inner 折；
+        #   2) 用内层最优超参在**整个训练折**上重拟合一次（cv.py 的 total_fits += ... + 1）。
+        # 旧版只算了 1)，dry-run 合计 8775，而报告写实测 8900——差额正是 (2)。
+        search = repeats * total_outer * c * n_inner
+        refit = repeats * total_outer
+        calls = search + refit
         per_model[spec.name] = {"candidates_per_fold": c, "inner_folds": n_inner,
                                 "outer_folds": total_outer, "repeats": repeats,
+                                "search_fit_calls": search, "refit_fit_calls": refit,
                                 "fit_calls": calls}
         total += calls
     perm = cfg["permutation"]
@@ -319,7 +354,9 @@ def run_nested_cv(
     task = ds.task
     repeats = effective_repeats(cfg)
     master = int(cfg["runtime"]["seed"])
-    n_jobs = int(cfg["runtime"].get("n_jobs", -1))
+    # n_jobs=-1 走 resolve_workers（异构核按 0.7×核数，见 utils 里的实测说明）；
+    # 显式正整数原样使用。并行只影响"几个 worker"，候选与折的评估顺序不变。
+    n_jobs = resolve_workers(cfg["runtime"].get("n_jobs", -1))
     fail_fast = bool(cfg["runtime"].get("fail_fast", False))
     n_classes = 1 if task == "regression" else int(len(ds.classes or [0, 1]))
     save_policy = str(cfg["runtime"].get("save_models", "last"))
@@ -344,9 +381,13 @@ def run_nested_cv(
         else:
             tds = ds
         y_all = np.asarray(tds.targets[tname])
+        # 每个模型的并行决策单独做：先串行跑它的第一个折来实测单次拟合成本，
+        # pls/ridge 这类毫秒级模型继续串行（并行只会更慢），rf/xgb 则吃满核。
+        spec_jobs: dict[str, int] = {}
         for r in range(repeats):
             seed_r = master + r * 1000
             outer = make_outer_splits(tds, cfg, seed_r)
+            units_per_spec = repeats * len(outer)
             for k, (tr, te) in enumerate(outer):
                 y_tr_all, y_te_all = y_all[tr], y_all[te]
                 g_tr = np.asarray(tds.groups, dtype=object)[tr]
@@ -391,10 +432,15 @@ def run_nested_cv(
 
                     # 失败边界必须覆盖 fit **和** predict：knn(n_neighbors > n_train)
                     # 这类错误只在 predict 时爆，旧写法会让整轮 90 折的算力全丢。
+                    use_jobs = spec_jobs.get(spec.name)
+                    warm = use_jobs is None
+                    if warm:
+                        use_jobs = 1          # 首次遇到该模型：串行跑，用来标定成本
+                    t_fit = time.perf_counter()
                     try:
                         est, best_params, best_score, _ = inner_search(
                             pipe, param_dicts, inner, tds.X[tr], y_tr_all,
-                            scoring=scoring, n_jobs=n_jobs, fail_fast=fail_fast,
+                            scoring=scoring, n_jobs=use_jobs, fail_fast=fail_fast,
                         )
                         total_fits += len(param_dicts) * len(inner) + 1
                         pred_te, proba_te, kind_te = _predict(est, tds.X[te], task)
@@ -407,6 +453,17 @@ def run_nested_cv(
                         warn(f"{msg} 失败：{type(exc).__name__}: {exc}")
                         fold_rows.append(_fail_row(exc, "fit/predict"))
                         continue
+
+                    if warm and n_jobs > 1:
+                        n_tasks_unit = max(1, len(param_dicts) * len(inner))
+                        per_fit = (time.perf_counter() - t_fit) / n_tasks_unit
+                        remain_units = max(0, units_per_spec - (r * len(outer) + k + 1))
+                        picked = (n_jobs if parallel_pays_off(
+                            remain_units * n_tasks_unit, per_fit, n_jobs) else 1)
+                        spec_jobs[spec.name] = picked
+                        if picked > 1:
+                            info(f"  [{tname}] {spec.name}: 单次拟合 {per_fit * 1000:.0f} ms，"
+                                 f"剩余 {remain_units} 个折 → 后续 n_jobs={picked}")
 
                     prep_idx = best_params.get("prep__which", 0)
                     prep_lab = prep_label(cfg, int(prep_idx)) if n_cands > 1 else prep_name(

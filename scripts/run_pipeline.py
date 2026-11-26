@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -56,6 +57,9 @@ STAGE_OUTPUTS = {
     "ad": "ad/ad_eval.json",
     "report": "report/report.md",
 }
+
+#: 已经就「中文目录 + 多进程」告警过的 run 目录（同一 run 只提醒一次）
+_NONASCII_WARNED: set[str] = set()
 
 # 单次拟合的兜底耗时（秒）：**只在实测标定失败时**使用。
 # 旧版只用这张表做估算，它跟行数、波长数、树数、预处理链全无关：
@@ -162,6 +166,14 @@ def _mark_done(stage: str, state: dict, key: str, run_dir: Path, seconds: float)
     write_json(run_dir / "_stages.json", state)
 
 
+def _stage_enabled(cfg: dict, stage: str) -> bool:
+    """stage 是否真的会执行：perm/ad/interp 由配置的 enabled 开关控制。"""
+    sec = {"interp": "interp", "perm": "permutation", "ad": "ad"}.get(stage)
+    if sec is None:
+        return True
+    return bool((cfg.get(sec) or {}).get("enabled", True))
+
+
 def _dry_run(ctx, stages: list[str]) -> int:
     from sml.audit import audit_dataset, render_audit_markdown
 
@@ -172,6 +184,11 @@ def _dry_run(ctx, stages: list[str]) -> int:
     from sml.utils import write_text
 
     write_text(out / "audit.md", render_audit_markdown(rep))
+
+    # 配置里 enabled=false 的 stage 实际不会跑，计划列表与耗时估算都不能把它们算进去
+    # （否则 dry-run 说"将执行 interp/perm/ad"，正式跑却全跳过，估时也白算）。
+    disabled = [s for s in stages if not _stage_enabled(ctx.cfg, s)]
+    stages = [s for s in stages if _stage_enabled(ctx.cfg, s)]
 
     specs = resolve_models(ctx.cfg, ctx.ds.task)
     est = estimate_fit_calls(ctx.ds, ctx.cfg, specs)
@@ -213,16 +230,21 @@ def _dry_run(ctx, stages: list[str]) -> int:
     # n_jobs=-1 在旧实现里被 max(1, -1) 吞成 1，导致 dry-run 按单核估算，
     # 在 8–16 核机器上高估 5–10 倍——这正是「预估 3 小时、实际 20 分钟」的主因。
     # 反过来，写死的 FIT_COST 又会在 airPLS/树模型上低估 1–2 个数量级。
-    raw_jobs = int(ctx.cfg["runtime"].get("n_jobs", 1) or 1)
-    n_jobs = (os.cpu_count() or 1) if raw_jobs < 0 else max(1, raw_jobs)
+    # 现在统一走 resolve_workers（异构核按 0.7×核数），效率系数按实测并行效率取 0.55：
+    # 本机 4 worker 实测 4.1x、10 worker 4.4x，即每 worker 贡献 0.44–1.0x，取中值偏保守。
+    from sml.utils import resolve_workers
+
+    n_jobs = resolve_workers(ctx.cfg["runtime"].get("n_jobs"))
     if n_jobs > 1:
-        total /= min(n_jobs, 16) * 0.8
+        total /= n_jobs * 0.55
 
     print()
     info(f"验证方案：{plan['strategy']}，外层 {plan['outer_n_splits']} 折 × 重复 {plan['repeats']} 次，"
          f"内层 {plan['inner_n_splits']} 折")
     info(f"分组键：{plan['group_col']}；{plan['note']}")
     info(f"将执行 stage：{', '.join(stages)}")
+    if disabled:
+        info(f"按配置 enabled=false 跳过：{', '.join(disabled)}")
     if len(est.get("per_target") or {}) > 1:
         info("各目标有效行数（多目标按各自 y 的有效值建模）：" +
              "；".join(f"{t} {v['n_rows']} 行/{v['n_groups']} 组"
@@ -243,9 +265,13 @@ def _dry_run(ctx, stages: list[str]) -> int:
     basis = "子样本冷启动实测标定（按行数×列数外推）" if calib else "经验系数（标定失败）"
     # 这行给的是**下限**：只算了拟合本身，没算 interp/perm 的带宽置换、报告绘图、
     # joblib 调度与折间开销。实测里这些常再翻 2–5 倍，所以说"下限"而不是装成精确值。
-    info(f"拟合耗时下限（{basis}，串行加总后按 n_jobs 折算）：约 {human_duration(total)}"
-         f"（n_jobs={n_jobs}；interp/perm 附加计算与调度开销另计，实际通常再高 2–10 倍；"
-         f"本 run 目录已有实测时以下一行「参考」为准）")
+    # 标定本身也在子样本上做，树模型与 airPLS 在满样本上单次拟合会更贵；本项目
+    # 实测墙面时间是「纯拟合下限」的 4.1 倍，因此按 2–4× 区间报，避免把下限当预计。
+    lo, hi = total, total * 4.0
+    info(f"拟合耗时区间（{basis}，串行加总后按 n_jobs={n_jobs} 折算）："
+         f"{human_duration(lo)}（纯拟合下限）– {human_duration(hi)}（含折间调度/预处理重建/"
+         f"绘图与报告的常见实测值）；interp/perm 的附加计算另计。"
+         f"本 run 目录若已有实测，以下一行「参考」更准")
     prev = _load_state(ctx.run_dir)
     if prev:
         parts = [f"{k} {v.get('seconds')}s" for k, v in prev.items()
@@ -346,6 +372,7 @@ def _run_multi_target(args, targets: list[str], excludes: list[str] | None = Non
 
     records: list[dict] = []
     all_ok = True
+    t_fanout = time.perf_counter()
     for i, tname in enumerate(targets, start=1):
         sub_out = out_root / "targets" / _target_slug(tname, i)
         argv = ["--config", str(args.config), "--out", str(sub_out)]
@@ -388,7 +415,11 @@ def _run_multi_target(args, targets: list[str], excludes: list[str] | None = Non
 
     index_path = _write_target_index(out_root, records)
     print()
-    info(f"多目标完成：{len(records)} 个目标，索引 {index_path}")
+    # 每个子 run 都会打印自己的「总耗时」，但那是**单个目标**的。多目标场景下
+    # 只报逐目标时间、不给总计，读者会把最后一个目标的时间当成整次运行的时间
+    # （本项目第二轮就因此把 21.3 分钟引成 10.2 分钟，算错了加速倍数）。
+    elapsed_all = (time.perf_counter() - t_fanout) / 60.0
+    info(f"多目标完成：{len(records)} 个目标，总耗时 {elapsed_all:.1f} 分钟，索引 {index_path}")
     for r in records:
         status = "ok" if r.get("exit") == 0 else f"失败(exit={r.get('exit')})"
         info(f"  ├ {r['target']}: {r.get('best_model', '—')} / "
@@ -404,6 +435,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-fanout", action="store_true",
                         help="不按目标拆子目录（单目标直接写在 run 根目录；多目标仅允许 audit,cv）")
     args = parser.parse_args(argv)
+
+    # dry-run 不该在用户当前目录留下东西。旧实现在没给 --out 时按 runs/<时间戳>_<数据名>
+    # 建出一整套 run 骨架（config.resolved/provenance/audit + 10 个空 stage 目录），
+    # 一条"只看审计"的命令会污染工作目录。这里改落系统临时目录，并在结尾打印路径。
+    if getattr(args, "dry_run", False) and not getattr(args, "out", None) \
+            and not getattr(args, "run_dir", None):
+        tmp_out = Path(tempfile.mkdtemp(prefix="sml_dryrun_"))
+        args.out = str(tmp_out)
+        info(f"--dry-run 未指定 --out：审计产物写到临时目录 {tmp_out}（不在当前目录建骨架）")
 
     # 按目标分流必须在建 run 目录之前：下游 stage（图/AD/置换/报告）都是单目标语义。
     # 单目标也默认走 targets/01_<目标>/，让目录结构统一；--no-fanout 可回到根目录。
@@ -436,8 +476,18 @@ def main(argv: list[str] | None = None) -> int:
     key = _stage_key(prov)
     state = _load_state(run_dir)
 
-    if non_ascii(str(run_dir)) and int(cfg["runtime"].get("n_jobs", 1) or 1) > 1:
-        warn("输出目录含非 ASCII 字符且开启多进程；若出现 pickle 报错，请改用英文目录或 --n-jobs 1")
+    # 中文目录 + 多进程：只在**每个 run 目录**上告警一次。
+    # 旧写法有两个毛病：n_jobs=-1（默认「用满核」）时 `-1 > 1` 为假，最需要提醒的
+    # 场景反而不提醒；而 >1 时又会在每个 stage 前重复打同一句（实测一次 run 4 次）。
+    if non_ascii(str(run_dir)):
+        from sml.utils import resolve_workers
+
+        if resolve_workers(cfg["runtime"].get("n_jobs")) > 1:
+            _k = str(run_dir)
+            if _k not in _NONASCII_WARNED:
+                _NONASCII_WARNED.add(_k)
+                warn("输出目录含非 ASCII 字符且开启多进程；若出现 pickle 报错，"
+                     "请改用英文目录或 --n-jobs 1")
 
     need_gb = float(cfg["runtime"].get("mem_guard_gb", 0) or 0)
     guard = mem_guard(need_gb, "本次建模") if need_gb > 0 else None
