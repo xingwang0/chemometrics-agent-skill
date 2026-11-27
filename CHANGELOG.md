@@ -2,6 +2,28 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
+## [Unreleased]
+
+### 新增
+
+- `AGENTS.md`：给 clone 下来在 Cursor / Codex 里打开的 agent 的仓库级说明（六阶段、红线、发布同步清单）。
+- `.claude-plugin/plugin.json` 与 `.claude-plugin/marketplace.json`：可用
+  `/plugin marketplace add xingwang0/chemometrics-agent-skill` 安装。根目录 `SKILL.md` 按
+  「单技能插件」加载（根有 `SKILL.md`、无 `skills/` 目录），目录结构不变。
+- README 安装段增加 `npx skills add`（跨 agent 通用）与 Claude Code 插件市场两条路径。
+
+### 变更
+
+- `SKILL.md` 的 `description` 改为**英文前置 + 中文触发词**（831 字符，上限 1024）。agent
+  启动时只加载 `name` 与 `description` 做路由；此前 description 全中文，英文提问与 skills.sh
+  的英文检索都匹配不上，而 `description_en` 是规范外字段、没有 agent 会读它。
+- `package.json` 关键词补 `claude-skills`、`agent-skills`、`near-infrared`。
+
+### 待办
+
+- **skills.sh 尚未收录**：`skills.sh/api/search?q=chemometrics` 返回 0 条，仓库页 404。
+  该目录没有提交表单，需要一次真实安装触发索引：`npx skills add xingwang0/chemometrics-agent-skill -g`。
+
 ## [1.2.7] - 2026-11-27
 
 ### 变更

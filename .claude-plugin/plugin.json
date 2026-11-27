@@ -1,0 +1,27 @@
+{
+  "name": "chemometrics-agent-skill",
+  "displayName": "Chemometrics Agent Skill",
+  "description": "Reviewer-grade ML modelling for NIR/FTIR/Raman/XRD spectra and tabular data: grouped nested cross-validation, permutation tests, applicability domain, publication figures, Methods draft.",
+  "version": "1.2.7",
+  "author": {
+    "name": "xingwang0",
+    "url": "https://github.com/xingwang0"
+  },
+  "homepage": "https://github.com/xingwang0/chemometrics-agent-skill",
+  "repository": "https://github.com/xingwang0/chemometrics-agent-skill",
+  "license": "Apache-2.0",
+  "keywords": [
+    "chemometrics",
+    "spectroscopy",
+    "near-infrared",
+    "nir",
+    "ftir",
+    "raman",
+    "xrd",
+    "pls-regression",
+    "cross-validation",
+    "applicability-domain",
+    "agent-skills",
+    "reproducible-research"
+  ]
+}

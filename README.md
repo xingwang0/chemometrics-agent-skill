@@ -35,7 +35,23 @@
 
 ## 安装
 
-**方式一：DeepSeek Harness 插件（一条命令）**
+**方式一：任何支持 Agent Skills 的 agent（`npx skills`，一条命令）**
+
+```bash
+npx skills add xingwang0/chemometrics-agent-skill -g       # 装到用户级
+npx skills add xingwang0/chemometrics-agent-skill --list   # 只看仓库里有哪些 skill
+```
+
+Claude Code、Codex、Cursor、OpenCode 读的是同一套 `SKILL.md`，装一次自动落到各自的 skills 目录，不用为每个 agent 重装。**你装这一次**还会把它登记进 [skills.sh](https://skills.sh) 目录——别人的 agent 用 `find-skills` 搜「chemometrics」「NIR 建模」时才找得到它。
+
+Claude Code 也可以用插件市场（本仓库根目录的 `SKILL.md` 按单技能插件加载）：
+
+```
+/plugin marketplace add xingwang0/chemometrics-agent-skill
+/plugin install chemometrics-agent-skill@chemometrics-agent-skill
+```
+
+**方式二：DeepSeek Harness 插件（一条命令）**
 
 ```bash
 dsh plugin --profile desktop add github:xingwang0/chemometrics-agent-skill
@@ -43,9 +59,9 @@ dsh plugin --profile desktop add github:xingwang0/chemometrics-agent-skill
 
 装的是 `dsh-research-ml-modeling`：加载时把本仓库的 `SKILL.md` 注册成 skill，`references/`、`scripts/`、`assets/` 随包走，**不往 `~/.dsh/skills` 复制**，升级插件即升级技能。装完**新开会话**才生效。
 
-> 已经用方式二装过同名 skill 的，二者留一个就行——同名技能会被注册两次。
+> 已经用方式三装过同名 skill 的，二者留一个就行——同名技能会被注册两次。
 
-**方式二：作为 skill 装进 agent**
+**方式三：作为 skill 装进 agent**
 
 ```bash
 # 克隆到 agent 的 skills 目录（按你的 agent 换成实际路径）
@@ -66,7 +82,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 
 需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（55 项）确认环境。
 
-**方式三：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
+**方式四：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
 
 ## 快速开始
 

@@ -9,6 +9,7 @@
     "cordis.patch.yml",
     "SKILL.md",
     "README.md",
+    "AGENTS.md",
     "llms.txt",
     "CHANGELOG.md",
     "CITATION.cff",
@@ -32,7 +33,9 @@
     "applicability-domain",
     "cross-validation",
     "machine-learning",
-    "reproducible-research"
+    "reproducible-research",
+    "claude-skills",
+    "agent-skills"
   ],
   "license": "Apache-2.0",
   "repository": {

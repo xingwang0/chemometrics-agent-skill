@@ -1,0 +1,18 @@
+{
+  "name": "chemometrics-agent-skill",
+  "owner": {
+    "name": "xingwang0",
+    "url": "https://github.com/xingwang0"
+  },
+  "description": "Chemometrics / spectroscopy modelling skills — reviewer-grade cross-validation, applicability domain, Methods draft.",
+  "plugins": [
+    {
+      "name": "chemometrics-agent-skill",
+      "source": {
+        "source": "github",
+        "repo": "xingwang0/chemometrics-agent-skill"
+      },
+      "description": "Reviewer-grade ML modelling for NIR/FTIR/Raman/XRD spectra and tabular data: grouped nested CV, permutation tests, applicability domain, publication figures, Methods draft."
+    }
+  ]
+}
