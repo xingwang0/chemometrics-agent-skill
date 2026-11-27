@@ -1,6 +1,6 @@
 {
   "name": "dsh-research-ml-modeling",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "科研级机器学习预测建模流程（NIR/FTIR/Raman/XRD 光谱与表格回归分类）：分组嵌套交叉验证、置换检验、适用域四法、论文级图表与 Methods 草稿",
   "type": "module",
   "main": "index.js",
@@ -9,6 +9,7 @@
     "cordis.patch.yml",
     "SKILL.md",
     "README.md",
+    "llms.txt",
     "CHANGELOG.md",
     "CITATION.cff",
     "LICENSE",
@@ -36,11 +37,11 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xingwang0/research-ml-modeling.git"
+    "url": "git+https://github.com/xingwang0/chemometrics-agent-skill.git"
   },
-  "homepage": "https://github.com/xingwang0/research-ml-modeling#readme",
+  "homepage": "https://github.com/xingwang0/chemometrics-agent-skill#readme",
   "bugs": {
-    "url": "https://github.com/xingwang0/research-ml-modeling/issues"
+    "url": "https://github.com/xingwang0/chemometrics-agent-skill/issues"
   },
   "engines": {
     "node": ">=20"

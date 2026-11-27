@@ -2,6 +2,24 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
+## [1.2.7] - 2026-11-27
+
+### 变更
+
+- **仓库改名为 `chemometrics-agent-skill`**。原名由三个通用词拼成，GitHub 站内搜索排在第
+  37 位（同名词条 1366 个），搜索与 AI 检索都找不到。新名同时带领域词（chemometrics）与
+  载体（agent-skill），全站 0 命中，裸词搜索即首位。旧地址由 GitHub 自动 301 跳转，
+  `clone` 与已发出的链接继续可用。**技能名 `research-ml-modeling`、插件包名
+  `dsh-research-ml-modeling`、六个阶段与全部产物均不变**，已装的插件与 skill 目录不受影响。
+- `README.md` 增加关键词行与 6 条「常见问题」，用研究者实际会搜的问句写（数据泄漏、
+  调参质疑、适用域、PLS 基线、多目标、数据格式）。
+- 新增 `llms.txt`：给 AI 检索器读的仓库索引，把「哪个文件回答哪个问题」列清楚。
+
+### 已知
+
+- 仓库名含连字符，`dsh plugin add` 的 GitHub 简写需写成
+  `github:xingwang0/chemometrics-agent-skill`；旧写法靠跳转仍可安装。
+
 ## [1.2.6] - 2026-11-26
 
 ### 新增

@@ -1,8 +1,12 @@
 # research-ml-modeling
 
+> 仓库地址已改为 `chemometrics-agent-skill`（旧地址自动 301 跳转）；技能名 `research-ml-modeling` 与插件包 `dsh-research-ml-modeling` 不变。
+
 **审稿级机器学习预测建模**：把「原始表格 → 数据审计 → 嵌套分组交叉验证 → 置换检验 → 适用域 → 论文级图表 + Methods 草稿 + 审稿质疑清单」固化成一条命令。
 
 面向材料、化学、光谱（NIR / FTIR / Raman / XRD / XPS / UV-Vis）与配方工艺参数等表格数据的回归与分类。也适用于任何"样本少、维度高、同一批次/同一样品测了多次"的实验数据。
+
+**关键词**：化学计量学 chemometrics · 近红外 NIR 定量建模 · 中红外 FTIR · 拉曼 Raman · XRD · PLS / PCR 回归 · 分组交叉验证 · 嵌套交叉验证 · 重复交叉验证 · 数据泄漏 data leakage · 适用域 applicability domain · Williams plot · Hotelling T² · Y 随机化置换检验 · VIP 变量重要性 · RPD / RPIQ · 光谱预处理 SNV / MSC / SG / airPLS · 小样本高维回归 · 论文 Methods 撰写 · 审稿意见回复
 
 > **这是一个 Agent Skill，不是要你自己敲命令的 CLI。**
 > 装进支持 Agent Skills 的 agent（Claude Code、Codex、Cursor、DeepSeek Harness 等）之后，
@@ -34,7 +38,7 @@
 **方式一：DeepSeek Harness 插件（一条命令）**
 
 ```bash
-dsh plugin --profile desktop add github:xingwang0/research-ml-modeling
+dsh plugin --profile desktop add github:xingwang0/chemometrics-agent-skill
 ```
 
 装的是 `dsh-research-ml-modeling`：加载时把本仓库的 `SKILL.md` 注册成 skill，`references/`、`scripts/`、`assets/` 随包走，**不往 `~/.dsh/skills` 复制**，升级插件即升级技能。装完**新开会话**才生效。
@@ -45,7 +49,7 @@ dsh plugin --profile desktop add github:xingwang0/research-ml-modeling
 
 ```bash
 # 克隆到 agent 的 skills 目录（按你的 agent 换成实际路径）
-git clone https://github.com/xingwang0/research-ml-modeling ~/.claude/skills/research-ml-modeling
+git clone https://github.com/xingwang0/chemometrics-agent-skill ~/.claude/skills/research-ml-modeling
 # Claude Code  ~/.claude/skills/    DeepSeek Harness  ~/.dsh/skills/
 ```
 
@@ -166,6 +170,26 @@ runs/<id>/
 - `--resume` 按三哈希判定：改任何一个 `.py`（哪怕注释）都会让产物失效重跑，这是故意的
 - 中文路径下多进程报 pickle 错，加 `--n-jobs 1`
 - 报告里的数字对不上，先怀疑自己手改了表——所有数字都能从 `cv/oof_predictions.csv` 重算
+
+## 常见问题
+
+**同一批样品测了多次，随机划分算不算数据泄漏？**
+算。同一个样品同时出现在训练折和验证折里，模型等于见过答案，R² 会虚高。本管线默认按 `sample_id` 分组划分，并把调参折与评估折分开（嵌套 CV）；把「样品数 × 重复次数」当样本数报也会在审计阶段被拦。
+
+**审稿人质疑 R² 是调参调出来的，怎么回应？**
+给嵌套交叉验证的结果——外层只评估、内层才调参；配 `cv/metrics_summary.csv` 的 mean±sd 与按组 bootstrap 置信区间，再附 Y 随机化置换检验的 p 值（`perm/permutation.json`），说明模型显著优于随机打乱标签。
+
+**新样品能不能直接拿来预测？**
+看适用域。`ad/ad_eval.json` 用 Hotelling T²、Q 残差、kNN 距离、Williams 杠杆四种方法判域，并检验「域外误差是否真的更大」。判定无效时报告会禁止宣称模型可外推——这是 Gate，不是建议。
+
+**PLS 和梯度提升树该报哪个？**
+两个都报。管线强制保留 PLS 基线并给 RPD / RPIQ，不允许只报树模型的提升幅度——化学计量学的审稿人默认要看到线性基线。
+
+**同时有好几个目标（比如水分和蛋白）要跑几次？**
+一次运行。配置里给多个 target，每个目标各自走一遍 CV / 置换 / 判域，报告按目标分开出。
+
+**支持什么数据格式？**
+CSV 与 Excel（`.xlsx` / `.xls` / `.xlsm`），一行一次测量，光谱列名写成波数（`4000`、`4008`…）。不做图像、不做深度学习。
 
 ## 许可
 

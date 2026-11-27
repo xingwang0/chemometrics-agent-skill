@@ -1,0 +1,36 @@
+# research-ml-modeling
+
+> 审稿级机器学习预测建模管线与 Agent Skill，面向材料、化学、光谱（NIR / FTIR / Raman / XRD / XPS / UV-Vis）与配方工艺等表格数据的回归与分类。把数据审计、嵌套分组交叉验证、Y 随机化置换检验、四类适用域判定、论文级图表与 Methods 草稿固化成一条命令；每个数字都能从 pooled 折外预测重算。
+
+- 仓库：https://github.com/xingwang0/chemometrics-agent-skill
+- 技能入口（agent 读这个）：https://github.com/xingwang0/chemometrics-agent-skill/blob/main/SKILL.md
+- 安装与快速开始：https://github.com/xingwang0/chemometrics-agent-skill/blob/main/README.md
+- 最近发布：https://github.com/xingwang0/chemometrics-agent-skill/releases
+
+## 它回答什么问题
+
+- 同一样品测了多次，随机划分为什么是数据泄漏，应该怎么分组：`references/validation-protocols.md`
+- 嵌套交叉验证与重复 CV 怎么报（mean±sd、按组 bootstrap）：`references/metrics-and-inference.md`
+- 适用域（Hotelling T²、Q 残差、kNN 距离、Williams 杠杆）怎么判、怎么验证有效性：`references/applicability-domain.md`
+- RPD / RPIQ / VIP 怎么算、怎么解释波段：`references/interpretation.md`
+- 审稿人会问什么、怎么答：`references/reviewer-checklist.md`
+- 光谱预处理（SNV / MSC / SG / airPLS）怎么进搜索空间：`references/spectral-preprocessing.md`
+- 图表与表格的出版规范：`references/reporting-and-figures.md`
+- 输入数据要长什么样：`references/data-format.md`
+- 配置字段全表：`references/config-schema.md`
+- 各个标准（TRIPOD+AI 等）怎么对应：`references/standards-mapping.md`
+- 换机 / 环境问题：`references/environment.md`、`references/troubleshooting.md`
+
+## 关键事实
+
+- 六个阶段：`audit → cv → interp → perm → ad → report`；产物分别是审计报告、折外预测、波段解释、置换检验、适用域、图表 + Methods 草稿 + 审稿清单。
+- 口径：主指标 R²；CV 按 `sample_id` 分组、调参与评估分离、重复 CV 报 mean±sd；AD 报独立样品数而非行数。
+- Gate：目标泄漏、置换检验 p ≥ 0.05、适用域无效、最优与次优差异不显著，都会改写结论或直接拦下。
+- 依赖：Python 3.11+、scikit-learn；插件包零 Node 依赖。不做深度学习、不做图像。
+- 许可：Apache-2.0。输出是计算产物，投稿前必须人工核对样品来源、仪器与测量条件。
+
+## 可选
+
+- [CHANGELOG](https://github.com/xingwang0/chemometrics-agent-skill/blob/main/CHANGELOG.md)
+- [CITATION.cff](https://github.com/xingwang0/chemometrics-agent-skill/blob/main/CITATION.cff)
+- [NOTICE（免责与输出性质）](https://github.com/xingwang0/chemometrics-agent-skill/blob/main/NOTICE)

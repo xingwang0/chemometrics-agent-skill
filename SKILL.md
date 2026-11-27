@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "科研级机器学习预测建模流程（材料/化学/光谱为主）。当用户要做近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，或配方/工艺参数等表格数据的回归与分类预测；要写论文 Methods、画预测散点/Williams plot/校准曲线；要算 RPD、VIP、适用域、Y-randomization 置换检验；要回答审稿人关于交叉验证、数据泄漏、过拟合、重复测量、批次效应的质疑时使用。内置分组交叉验证 + 嵌套调参 + 重复 CV + 置换检验 + 按组 bootstrap 置信区间 + 适用域四法 + 审稿质疑清单。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.2.6"
+version: "1.2.7"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash

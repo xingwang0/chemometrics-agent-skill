@@ -12,11 +12,11 @@ type: software
 authors:
   - name: "xingwang0"
     website: "https://github.com/xingwang0"
-repository-code: "https://github.com/xingwang0/research-ml-modeling"
-url: "https://github.com/xingwang0/research-ml-modeling"
+repository-code: "https://github.com/xingwang0/chemometrics-agent-skill"
+url: "https://github.com/xingwang0/chemometrics-agent-skill"
 license: Apache-2.0
-version: "1.2.5"
-date-released: "2026-11-25"
+version: "1.2.7"
+date-released: "2026-11-27"
 keywords:
   - chemometrics
   - spectroscopy
