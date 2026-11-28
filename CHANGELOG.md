@@ -2,6 +2,41 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)；版本号遵循语义化版本。
 
+## [1.2.11] - 2026-11-28
+
+一次实地测试（5 套公开实验数据 + 38 条用例）暴露的缺陷修复。**有行为变更**：两条原本
+静默通过的配置现在会直接报错，长表读入的语义也被补齐。
+
+### 修复
+
+- **`data.format="long"` 在有监督任务下必报 `E-IO-014`**：`_coerce_long` 用
+  `pivot_table(index=id, columns=x, values=y)` 只保留「样品 ID + 波数列」，目标值、批次、
+  重复测量信息全部被丢弃，`task.target` 于是"不在表头中"。现在 pivot 后按 `id` 把
+  id/x/y 之外的列挂回去（1:1 merge）；同一样品多行取值冲突时取首行并告警（`warn`），
+  不再静默。
+- **报告「验证方案」段把分组键写错**：`report.py` 两处（`:828` 的模板变量、`:1322` 的
+  正文）都取 `data.id_col`，`audit.py:250` 的 `recommendations.group_col` 同样如此。
+  按 `mixture_id` 分组、`sample_id` 是样品编号时，方法学段落会写成「按 sample_id 分组」。
+  现统一由 `report.group_key_text()` 取 `split.group_col` → `data.id_col` → 指纹兜底。
+- **`evaluation.metrics` 写错名被静默丢弃**：`"R2"` / `"RMSE"` 这类大小写笔误会让表里
+  少一列而退出码仍为 0。现加白名单校验，未知项报 `E-CFG-047` 并给出最接近的候选名；
+  在回归任务里请求分类指标（如 `auc`）同样报错并指明原因。
+- `.xls` 读取：`requirements.txt` 补 `xlrd>=2.0.1`（pandas 读 BIFF8 必需），此前文档声明
+  支持 `.xls` 但依赖清单没有它，实际必然 `E-IO-002`。
+- `package.json` 版本号自 1.2.7 起未同步，现与 `SKILL.md` / `sml.__version__` /
+  `CHANGELOG` 一致；selfcheck 的三方一致检查仍不覆盖 `package.json`（保持原设计，避免
+  打包元数据反向约束运行时版本）。
+
+### 自检
+
+- 55 → **61** 项。新增 `io` 组两项，正好覆盖上面两个「59 项全绿却漏过去」的缺陷：
+  长表转宽必须保留目标/批次列；`evaluation.metrics` 笔误必须在配置期拦截。
+
+### 文档
+
+- `README.md` / `AGENTS.md` / `references/environment.md` 的自检项数改为 61（以
+  `selfcheck.py` 实际输出为准）；`requirements.txt` 顶部注释里陈旧的「34 项」一并更正。
+
 ## [Unreleased]
 
 ### 新增

@@ -1,6 +1,6 @@
 {
   "_schema": "sml-config/1",
-  "_comment": "最小可跑配置：用于 selfcheck、教学和快速冒烟。约 1-2 分钟跑完全流程。",
+  "_comment": "最小可跑配置：用于 selfcheck、教学和快速冒烟。约 1-2 分钟跑完全流程。注意 demo_nir.csv 里还有 moisture/fat/starch 三列兄弟成分，已用 exclude_from_features 剔出特征矩阵——否则它们会成为「用蛋白预测蛋白」之外的捷径，冒烟结果看起来虚高。",
   "task": {
     "type": "regression",
     "target": ["protein"]
@@ -12,6 +12,7 @@
     "batch_col": "batch",
     "replicate_col": "replicate",
     "drop_cols": ["备注", "序号", "dead_band_1", "dead_band_2", "moisture_copy", "moisture_copy_noisy"],
+    "exclude_from_features": ["moisture", "fat", "starch"],
     "min_valid_frac": 0.5,
     "wavelength_axis": {"start": 4000, "stop": 10000, "step": 8, "unit": "cm-1"}
   },

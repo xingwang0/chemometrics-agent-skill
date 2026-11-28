@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import json
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,12 @@ BUDGETS: dict[str, dict[str, Any]] = {
 
 REG_METRICS = ["r2", "rmse", "mae", "bias", "rpd", "rpiq", "ccc", "slope"]
 CLF_METRICS = ["auc", "balanced_accuracy", "f1_macro", "mcc", "brier", "sensitivity", "specificity"]
+
+# 可请求的指标键（比上面两个默认列表宽：默认不展示的 auprc / ece / log_loss /
+# accuracy / intercept 也可以显式要）。校验用，顺序无关。
+REG_METRIC_KEYS = frozenset(REG_METRICS + ["intercept", "n"])
+CLF_METRIC_KEYS = frozenset(
+    CLF_METRICS + ["auprc", "ece", "log_loss", "accuracy", "n"])
 
 ALL_STAGES = ["audit", "cv", "interp", "perm", "ad", "report"]
 # 置换检验是 SKILL.md「严谨性红线」里的必做项，默认必须包含。
@@ -661,6 +668,30 @@ def validate_config(cfg: dict) -> list[str]:
 
     if cfg["evaluation"]["metrics"] is None:
         cfg["evaluation"]["metrics"] = list(REG_METRICS if task == "regression" else CLF_METRICS)
+
+    # 指标名白名单。旧实现里 'R2' / 'RMSE' 这种大小写笔误会被静默丢弃——表里少一列、
+    # 退出码仍是 0，论文少一张指标表却不自知。这里直接报错，并给出最接近的候选名。
+    want_keys = REG_METRIC_KEYS if task == "regression" else CLF_METRIC_KEYS
+    other_keys = CLF_METRIC_KEYS if task == "regression" else REG_METRIC_KEYS
+    other_task = "classification" if task == "regression" else "regression"
+    problems: list[str] = []
+    for m in cfg["evaluation"]["metrics"]:
+        key = str(m)
+        if key in want_keys:
+            continue
+        near = difflib.get_close_matches(key.lower(), sorted(want_keys), n=1, cutoff=0.6)
+        if key in other_keys:
+            problems.append(f"{key!r} 只适用于 {other_task}")
+        elif near:
+            problems.append(f"{key!r}（是否想写 {near[0]!r}？）")
+        else:
+            problems.append(f"{key!r}（未知；可选：{', '.join(sorted(want_keys))}）")
+    if problems:
+        raise ConfigError(
+            "E-CFG-047",
+            f"evaluation.metrics 有 {len(problems)} 项无法识别：{'；'.join(problems)}。\n"
+            f"  当前任务 {task} 可用指标：{', '.join(sorted(want_keys))}",
+        )
 
     ad_methods = cfg["ad"]["methods"]
     known_ad = {"pca_t2", "pca_q", "knn", "leverage"}

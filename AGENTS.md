@@ -10,7 +10,7 @@
 |---|---|
 | `SKILL.md` | 技能定义。要判断该走哪几个 stage，读这里 |
 | `scripts/run_pipeline.py` | 六阶段主入口：`audit → cv → interp → perm → ad → report` |
-| `scripts/selfcheck.py` | 环境自检，55 项 |
+| `scripts/selfcheck.py` | 环境自检，61 项 |
 | `references/` | 按需读取：`reviewer-checklist.md`、`applicability-domain.md`、`config-schema.md`、`validation-protocols.md` |
 | `assets/config/` | 四个预设：`regression_spectra` / `regression_tabular` / `classification_tabular` / `smoke` |
 

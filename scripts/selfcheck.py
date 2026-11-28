@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 import tempfile
@@ -1587,6 +1588,78 @@ def _threshold_table_guard() -> tuple[bool, str]:
         return _fail("Youden 阈值恒等于 0.5，选择逻辑可能未生效")
     return _ok(f"0.5 行与 classification_metrics 一致（sens={m['sensitivity']:.3f}）；"
                "三口径阈值 {:.2f}/{:.2f}/{:.2f}；多分类不产 T8".format(*thr["阈值"]))
+
+
+# --------------------------------------------------------------------------- #
+# 数据 I/O 与配置校验（1.2.11 新增：这两个缺陷都曾让 59 项全绿却漏过去）
+# --------------------------------------------------------------------------- #
+@check("io", "长表转宽表必须保留目标列与批次列（format=long 的可用性前提）")
+def _long_keeps_targets() -> tuple[bool, str]:
+    """历史缺陷：pivot_table 只保留 index+波数列，目标列被丢掉 → 任何有监督任务
+    都撞 E-IO-014，而长表这条路在文档里是「受支持」的。"""
+    from sml.io_data import _coerce_long
+
+    ids = [f"S{i:02d}" for i in range(4)]
+    waves = [1000, 1002, 1004]
+    rows = []
+    for i, sid in enumerate(ids):
+        for w in waves:
+            rows.append({"sid": sid, "wl": w, "abs": float(i * 10 + w % 10),
+                         "protein": 8.0 + i, "batch": "m5", "rep": i % 2 + 1})
+    long_df = pd.DataFrame(rows)
+    cfg = {"data": {"long_cols": {"id": "sid", "x": "wl", "y": "abs"}}}
+    wide = _coerce_long(long_df, cfg)
+
+    ok_cols = {"protein", "batch", "rep"}
+    missing = ok_cols - set(wide.columns)
+    if missing:
+        return _fail(f"转宽后丢了样品级列 {sorted(missing)}（现存列：{list(wide.columns)[:8]}）")
+    # 波数列名沿用 x 列的 dtype（int 表进来就是 int 列名），所以按字符串比
+    cols_as_str = {str(c) for c in wide.columns}
+    if wide.shape[0] != 4 or not all(str(w) in cols_as_str for w in waves):
+        return _fail(f"波数列或行数不对：shape={wide.shape}，列={list(wide.columns)}")
+    if list(wide["protein"]) != [8.0, 9.0, 10.0, 11.0]:
+        return _fail(f"目标值与样品未对齐：{list(wide['protein'])}")
+
+    # 同一样品多行取值冲突时必须告警（允许取首行，但不能静默）
+    bad = long_df.copy()
+    bad.loc[0, "protein"] = 99.0
+    wide2 = _coerce_long(bad, cfg)
+    if float(wide2["protein"].iloc[0]) != 99.0:
+        return _fail("冲突行没有取首行值，行为与告警文案不一致")
+    return _ok(f"4 样品 × {len(waves)} 波数点，保留 protein/batch/rep；"
+               f"冲突取值取首行并告警")
+
+
+@check("io", "evaluation.metrics 写错名必须在配置期被拦截（不许静默少一列）")
+def _metric_typo_guard() -> tuple[bool, str]:
+    """历史缺陷：metrics 里写 'R2' 会被静默丢弃，退出码仍为 0，论文少一张表却不自知。"""
+    from sml.config import ConfigError, load_config, validate_config
+
+    base = load_config(ASSETS / "config" / "smoke.json")
+    cases = [("R2", "r2"), ("RMSE", "rmse"), ("auc", None)]
+    missed: list[str] = []
+    for bad, hint in cases:
+        cfg = copy.deepcopy(base)
+        cfg["evaluation"]["metrics"] = [bad, "rmse"]
+        try:
+            validate_config(cfg)
+        except ConfigError as exc:
+            msg = str(exc)
+            if "E-CFG-047" not in msg:
+                missed.append(f"{bad}: 抛了 ConfigError 但错误码不是 E-CFG-047")
+            elif hint and hint not in msg:
+                missed.append(f"{bad}: 报错信息未给出候选 {hint!r}")
+        except Exception as exc:  # noqa: BLE001
+            missed.append(f"{bad}: 抛了 {type(exc).__name__} 而不是 ConfigError")
+        else:
+            missed.append(f"{bad}: 未被拦截（会静默少一列）")
+    if missed:
+        return _fail("；".join(missed))
+    cfg = copy.deepcopy(base)
+    cfg["evaluation"]["metrics"] = ["r2", "rmse", "rpd"]
+    validate_config(cfg)  # 合法名不得被误拒
+    return _ok("'R2'/'RMSE' 均报 E-CFG-047 并给出候选名；回归任务里写分类指标 auc 也被拦；合法名不误拒")
 
 
 # --------------------------------------------------------------------------- #

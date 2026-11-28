@@ -126,7 +126,7 @@ XGBRegressor(n_estimators=500, early_stopping_rounds=50).fit(X, y, eval_set=[(Xv
 
 ## 4. 换机器时的检查清单
 
-1. `python scripts/selfcheck.py` —— 55 项全绿再动手（含 env / leakage / registry / multitarget / reporting / multiclass / provenance / split / present / figure_qc / standards 十一组）
+1. `python scripts/selfcheck.py` —— 61 项全绿再动手（含 env / io / leakage / registry / multitarget / reporting / multiclass / provenance / split / present / figure_qc / standards 十二组）
 2. 看 `内存探测可用` 一项；`runtime.mem_guard_gb` 按实际内存调
 3. 若 Python < 3.11：`config.py` 的类型注解（`str | Path`）会报错，需改 `Union`
 4. 若 sklearn < 1.6：`GroupKFold` 无 `shuffle`，`cv.py` 会走 KD 降级路径（selfcheck 会提示）

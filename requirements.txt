@@ -1,6 +1,6 @@
 # research-ml-modeling 运行依赖
 # 实测通过的环境：Python 3.14.7 / numpy 2.5.3 / pandas 3.0.6 / scikit-learn 1.9.1
-# 详见 references/environment.md 与 scripts/selfcheck.py 的「env」组（34 项自检里 18 项是环境探针）。
+# 详见 references/environment.md 与 scripts/selfcheck.py 的「env」组（61 项自检里 18 项是环境探针）。
 # 安装：python -m pip install -r requirements.txt
 
 # --- 必需：缺任何一个都跑不起来 ---
@@ -12,6 +12,7 @@ matplotlib>=3.7       # 全部论文图；中文字体需本机已装（selfchec
 joblib>=1.3           # 折模型与最终模型落盘
 openpyxl>=3.1         # 读 xlsx
 xlsxwriter>=3.1       # 写 xlsx（报告的多表导出）
+xlrd>=2.0.1           # 读旧版 .xls（BIFF8）；pandas 读 .xls 时必需，缺了会报 E-IO-002
 
 # --- 可选：缺失时对应模型/功能自动降级，selfcheck 会标注「可选包缺失」 ---
 # xgboost>=2.0

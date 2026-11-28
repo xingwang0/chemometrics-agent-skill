@@ -265,7 +265,30 @@ def _coerce_long(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             f"请先统一定标或改用意插值。当前拒绝静默对齐。",
         )
     wide = wide.reset_index()
-    info(f"长表转宽表：{wide.shape[0]} 样品 × {wide.shape[1] - 1} 波数点")
+    n_wave = wide.shape[1] - 1
+
+    # 长表里除 id/x/y 之外通常还带着目标值与批次/重复信息——导出软件往往把「一样品
+    # 一列」的属性重复写在每一行上。pivot_table 只保留 index 与波数列，若不把这些列
+    # 挂回去，task.target / data.batch_col / data.replicate_col 在转宽后就"消失"了，
+    # 任何有监督任务都会撞 E-IO-014（旧实现即如此，见 CHANGELOG 1.2.11）。
+    extra_cols = [c for c in df.columns if c not in (xcol, ycol) and c != id_col]
+    if extra_cols:
+        n_uniq = df.groupby(id_col, dropna=False)[extra_cols].nunique(dropna=False)
+        varying = [c for c in extra_cols if int(n_uniq[c].max()) > 1]
+        if varying:
+            warn(
+                f"长表里这些列在同一样品的多行之间取值不一致：{varying}；"
+                f"已取每个样品的首行值。若它们本身就是逐点变化的量（如温度曲线），"
+                f"请先按样品聚合或改名后再用 format=long。"
+            )
+        meta = df[[id_col, *extra_cols]].drop_duplicates(subset=[id_col], keep="first")
+        wide = wide.merge(meta, on=id_col, how="left", validate="one_to_one")
+
+    info(
+        f"长表转宽表：{wide.shape[0]} 样品 × {n_wave} 波数点"
+        + (f"（另保留 {len(extra_cols)} 列样品级信息：{extra_cols[:6]}"
+           f"{' …' if len(extra_cols) > 6 else ''}）" if extra_cols else "")
+    )
     return wide
 
 

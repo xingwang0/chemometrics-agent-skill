@@ -80,7 +80,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 
 装好后**新开一个会话**——skill 列表在会话启动时加载，当前会话看不到。
 
-需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（55 项）确认环境。
+需要 Python 3.11+ 与 `requirements.txt` 里的依赖；装完先跑一次 `selfcheck.py`（61 项）确认环境。
 
 **方式四：不装 skill，直接跑命令行** — 见下方「快速开始」，效果一样，只是得自己决定跑哪几个 stage。
 
@@ -89,7 +89,7 @@ ln -s /path/to/research-ml-modeling ~/.claude/skills/research-ml-modeling
 ```bash
 # 在仓库根目录执行（agent 内部也是这么调的）
 
-# 1) 先验环境：55 项自检（换机必跑）
+# 1) 先验环境：61 项自检（换机必跑）
 python scripts/selfcheck.py
 
 # 2) 再跑通：30 秒冒烟，用合成数据走完全流程
@@ -144,7 +144,7 @@ audit → cv → interp → perm → ad → report
 
 ```
 runs/<id>/
-├── config.resolved.json  provenance.json      ← 三哈希，改一行代码就失效重跑
+├── config.resolved.json  provenance.json      ← 三哈希，改一行代码就失效重跑；多目标时在 targets/01_<目标>/
 ├── audit/audit.md                             ← 先看这个
 ├── cv/     oof_predictions.csv · metrics_summary.csv · metrics_ci.csv · comparison.csv
 ├── perm/permutation.json

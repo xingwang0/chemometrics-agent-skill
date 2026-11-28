@@ -247,7 +247,10 @@ def _recommend(ds: Dataset, ginfo: dict[str, Any], cfg: dict) -> dict[str, Any]:
     rec: dict[str, Any] = {}
     n_groups = ginfo["n_groups"]
     k_out = int(cfg["split"]["outer"]["n_splits"])
-    rec["group_col"] = cfg["data"].get("id_col") or "auto_fingerprint"
+    # 建议值必须反映实际生效的分组键：split.group_col 优先，其次 data.id_col。
+    # 只写 data.id_col 会让「按配比 mixture_id 分组」的 run 在报告里被写成 sample_id。
+    rec["group_col"] = (cfg["split"].get("group_col")
+                        or cfg["data"].get("id_col") or "auto_fingerprint")
 
     if n_groups < 5:
         rec["outer_n_splits"] = max(2, n_groups)
@@ -412,6 +415,9 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
     pseudo = _pseudo_id_scan(ds)
     epv = _epv(ds)
     rec = _recommend(ds, ginfo, cfg)
+    # 建议文案必须写实际生效的分组键：按 mixture_id 分组的 run 若被建议成
+    # 「确保 sample_id 相同」，作者会照着改错列（与报告方法学段落同源，见 1.2.11）。
+    gkey = cfg["split"].get("group_col") or cfg["data"].get("id_col") or "分组键"
 
     miss_frac = float(np.isnan(ds.X).mean()) if ds.n_features else 0.0
     dup_rows = int(ds.X.shape[0] - len(np.unique(np.asarray(ds.X, dtype=np.float64), axis=0)))
@@ -460,7 +466,7 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
             "info", "重复测量结构", key="replicates",
             detail=(f"{ginfo['n_groups']} 个独立样品、{ginfo['n_rows']} 行测量，"
                     f"每样品 {ginfo['rows_per_group_min']}–{ginfo['rows_per_group_max']} 行"),
-            action="必须使用 GroupKFold(groups=sample_id)，随机 KFold 会用同一样品的另一次测量预测自己",
+            action=f"必须使用 GroupKFold(groups={gkey})，随机 KFold 会用同一样品的另一次测量预测自己",
         ))
     else:
         F.append(Finding(
@@ -572,7 +578,8 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
                       "OOF 指标偏高。先去重（保留每组一行）再重跑，把两次结果并列报告"
                       ).format(cross=cross)
         else:
-            action = "检查是否同一测量被重复录入；若确为独立重复测量，确保 sample_id 相同（分组会处理）"
+            action = (f"检查是否同一测量被重复录入；若确为独立重复测量，确保 {gkey} 相同"
+                      f"（分组会处理）")
         F.append(Finding("warn", "完全重复行", key="dup_rows", detail=detail, action=action))
 
     # 跨批次重叠：决定 holdout_batch / loo_batch 的结论还算不算「外部验证」

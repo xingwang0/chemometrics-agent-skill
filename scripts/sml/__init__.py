@@ -16,5 +16,5 @@ standards    TRIPOD+AI 清单映射（条目文本由人工转录）
 
 from __future__ import annotations
 
-__version__ = "1.2.10"
+__version__ = "1.2.11"
 __all__ = ["__version__"]

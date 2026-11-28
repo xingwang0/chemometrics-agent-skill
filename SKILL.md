@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "Reviewer-grade ML modelling for NIR/FTIR/Raman/XRD/XPS/UV-Vis spectra and tabular regression or classification: grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), RPD/RPIQ/VIP, PLS/PCR baselines, cluster bootstrap confidence intervals, publication-quality figures, Methods draft, reviewer rebuttal checklist. Use when the user asks for chemometrics or NIR/FTIR/Raman/XRD modelling, a PLS or PCR calibration, an applicability domain or Williams plot, a permutation test, RPD/VIP, or is answering reviewers about data leakage, overfitting, repeated measurements or batch effects. 科研级机器学习预测建模：近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，配方/工艺参数等表格数据的回归与分类，论文 Methods 撰写，审稿质疑回应，RPD / VIP / 适用域 / 置换检验 / 分组交叉验证 / 数据泄漏。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.2.10"
+version: "1.2.11"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
@@ -35,7 +35,7 @@ agent_created: true
 | **「最优模型」需显著性（1.2.2）** | 未过 BH 显著性时改称「排序第一的模型」，不再出现无依据的"最优" | 无需操作 |
 | **dry-run 不落 cwd（1.2.2）** | 不传 `--out` 时写系统临时目录；stage 列表按 `enabled` 过滤；估时改区间 | 无需操作 |
 | **新增 `report/report.html`** | 单文件响应式报告，CSS 全内联、零外链零 JS，断网/邮件附件可原样打开；`report.md` 仍在 | 无需操作；`report.html: false` 可关闭 |
-| **自检 34 → 55 项** | 新增 `present` 10、`figure_qc` 5、`standards` 2、`reporting` 口径 4（1.2.4 加「杠杆参考集」，1.2.5 加「AD 汇总结论」） | 换机先跑 `selfcheck.py`，55/55 再动数据 |
+| **自检 34 → 55 → 61 项** | 新增 `present` 10、`figure_qc` 5、`standards` 2、`reporting` 口径 4（1.2.4 加「杠杆参考集」，1.2.5 加「AD 汇总结论」）；1.2.11 加 `io` 2（长表保留目标列、指标名笔误拦截） | 换机先跑 `selfcheck.py`，全绿再动数据 |
 | **显示层收口到 `sml/present.py`** | 精度按字段裁决（R² 3 位、RPD 2 位、RMSE 4 位有效数字）；比例统一为百分数；`-0.000` 结构上不可能出现 | 只影响文字，`tables/*.csv` 与 `tables.xlsx` 的单元格值仍是未舍入 float |
 | **p 值 4 位改 3 位**，`p<0.001` / `p>0.999` 用不等号 | 置换检验的 p 有硬下限 `1/(1+n_perm)`，写 `0.0000` 是错的 | 无需操作 |
 | **图内轴标签带单位** | 需配 `data.target_unit`（如 `"%"`、`"mg/kg"`）；不填则写「单位未指定」并挂 blocking 徽标，**不再静默省略量纲** | 建议都填上 |
@@ -74,7 +74,7 @@ agent_created: true
 **换机或换人**：把上面两行换成你自己的解释器与技能根，然后**先跑自检**再谈建模：
 
 ```bash
-python scripts/selfcheck.py          # 55 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性、展示规格、图件完整性
+python scripts/selfcheck.py          # 61 项：解释器、依赖版本矩阵、模型注册表、泄漏探针、口径一致性、展示规格、图件完整性
 ```
 
 自检会逐项告诉你缺哪个包、版本差在哪、哪条 API 已移除，不需要猜。全绿之后才可能跑出可信数字。
@@ -100,7 +100,7 @@ PY="python"                                    # 换成你自己的解释器
 ROOT="/path/to/research-ml-modeling"           # 换成技能目录
 DATA="/path/to/your_spectra.xlsx"
 
-# 1) 环境自检（首次/换机必跑，55 项）
+# 1) 环境自检（首次/换机必跑，61 项）
 $PY "$ROOT/scripts/selfcheck.py"
 
 # 2) 预演：只审计 + 报"要拟合多少次、大概多久"，不训练
@@ -241,7 +241,7 @@ $PY "$ROOT/scripts/run_pipeline.py" --config ... --set split.repeats=10 --set pe
 
 ```
 runs/<id>/
-├── config.resolved.json   provenance.json
+├── config.resolved.json   provenance.json      ← 多目标 fan-out 时每个目标各一份，在 targets/01_<目标>/
 ├── audit/audit.md         数据审计（先看这个）
 ├── cv/                    oof_predictions.csv · metrics_summary.csv（按模型聚合）·
 │                          metrics_by_prep.csv（按模型×预处理细分）· metrics_ci.csv · comparison.csv

@@ -42,6 +42,18 @@ METRIC_LABELS_EN = {
 }
 
 
+def group_key_text(cfg: dict) -> str:
+    """报告里「按什么分组」必须等于实际生效的 ``split.group_col``。
+
+    旧实现两处都取 ``data.id_col``（一处直接取、一处读 audit 的建议值），当
+    ``split.group_col`` 与 ``data.id_col`` 不同时（例如样品编号 sample_id、按配比
+    mixture_id 分组），方法学段落就会把分组对象写成 sample_id——论文里的硬伤。
+    """
+    return (cfg.get("split", {}).get("group_col")
+            or cfg.get("data", {}).get("id_col")
+            or "特征指纹推断")
+
+
 def ad_conclusion_en(eff: Any, task: str = "regression", verdict: str | None = None) -> str:
     what = "misclassification rate" if task == "classification" else "prediction error"
     # 「方向相反」不能落进「无显著差异」那句：审稿人会以为只是检验没力，
@@ -825,7 +837,7 @@ def build_methods(ctx, best_model: str, block: dict, perm: dict, ad_eval: dict,
     mapping = {
         "n_rows": ds.n_samples, "n_groups": ds.n_groups, "n_features": ds.n_features,
         "target": ds.target_name,
-        "group_col": cfg["data"].get("id_col") or "特征指纹推断",
+        "group_col": group_key_text(cfg),
         "batch_text": (f"数据来自 {n_batch} 个批次（{cfg['data'].get('batch_col')}）"
                        if ds.batch is not None else "数据未提供批次信息"),
         "batch_text_en": (f"the data originated from {n_batch} batches "
@@ -1319,7 +1331,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     lines.append("## 三、验证方案")
     lines.append("")
     plan = _read_json_if(ctx.run_dir, "cv/cv_summary.json")
-    lines.append(f"- 策略：`{cfg['split']['strategy']}`（{_read_json_if(ctx.run_dir, 'audit/audit.json').get('recommendations', {}).get('group_col', 'sample_id')} 分组）")
+    lines.append(f"- 策略：`{cfg['split']['strategy']}`（{group_key_text(cfg)} 分组）")
     # 外层折数必须写实际会跑的折数：holdout_batch / loo_batch / holdout_random 都不是
     # cfg 里的 outer.n_splits（旧实现照抄，Tecator 的留一批次被写成「5 折分组 CV」）。
     _n_outer = int(plan.get("n_outer_folds") or _real_outer_folds(ds, cfg))

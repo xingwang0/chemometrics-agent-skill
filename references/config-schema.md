@@ -81,7 +81,7 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `format` | `wide` | `wide` 或 `long`（长表三列） |
+| `format` | `wide` | `wide` 或 `long`（长表三列）。`long` 时**除 `long_cols` 指定的 x/y 之外的所有列**（目标、批次、重复测量）会按 `id` 挂回宽表；同一样品多行取值冲突时取首行并告警 |
 | `path` | — | 数据文件；相对路径按**配置文件所在目录**解析 |
 | `sheet` | `0` | Excel 工作表名或索引 |
 | `encoding` | `utf-8` | CSV 编码；中文 Windows 常见 `gb18030` |
@@ -204,12 +204,20 @@ python run_pipeline.py --config <json> [--data <表>] [--out <目录>]
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `metrics` | null | null 时按任务取默认集合 |
+| `metrics` | null | null 时按任务取默认集合。**写错名报 `E-CFG-047`**（附最接近的候选名），不再静默丢弃 |
 | `bootstrap.n` | 2000 | 按样品重采样次数 |
 | `bootstrap.alpha` | 0.05 | 1-alpha 即 CI 水平 |
 
 回归默认：`r2 rmse mae bias rpd rpiq ccc slope`
 分类默认：`auc balanced_accuracy f1_macro mcc brier sensitivity specificity`
+
+两类可请求的完整键（默认列表之外的也能显式要）：
+
+- 回归：`r2 rmse mae bias rpd rpiq ccc slope intercept n`
+- 分类：`auc auprc balanced_accuracy f1_macro mcc brier ece log_loss sensitivity specificity accuracy n`
+
+> `metrics` 是白名单校验：回归任务里写 `auc`、或把 `r2` 写成 `R2`，都会在配置期报
+> `E-CFG-047`——旧实现是静默丢掉这项，表里少一列而退出码仍为 0。
 
 ---
 
