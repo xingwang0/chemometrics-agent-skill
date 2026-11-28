@@ -18,7 +18,9 @@
     "requirements.txt",
     "references/**",
     "scripts/**",
-    "assets/**"
+    "assets/**",
+    "!**/__pycache__/**",
+    "!**/*.py[cod]"
   ],
   "keywords": [
     "deepseek",
