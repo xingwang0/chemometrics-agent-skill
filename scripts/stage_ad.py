@@ -18,7 +18,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from sml.ad import ad_summary_table, evaluate_ad_with_X, fit_ad  # noqa: E402
+from sml.ad import ad_summary_table, evaluate_ad_with_X, fit_ad, mixed_author_note  # noqa: E402
 from sml.io_data import impute_for_diagnostics  # noqa: E402
 from sml.stage_common import build_parser, prepare  # noqa: E402
 from sml.utils import info, warn, write_json  # noqa: E402
@@ -152,6 +152,10 @@ def run_ad(ctx) -> dict:
                 f"显著更高」。逐模型判定：{dist}。因此只能写「部分模型上适用域能区分出更差的预测，"
                 f"但不足以作为统一的域外筛选依据」，不能概称「AD 有效」；"
                 f"逐模型 p 值与域内外误差见 T5 表。")
+            # 1.2.8：author_note 必须与 conclusion 同口径。旧实现只覆写了 conclusion，
+            # author_note 仍是首个模型的「AD 有效」，report 的「写作提示」会把这句话原样
+            # 印出来，与同节的「不一致」结论自相矛盾（1.2.5 的同一处漏改的另一半）。
+            result["author_note"] = mixed_author_note(by.get("effective", []), len(per_model))
             info(f"AD 有效性（混合）：{result['conclusion']}")
         else:
             info(f"AD 有效性：{conclusion}")

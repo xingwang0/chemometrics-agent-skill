@@ -24,6 +24,127 @@
 - **skills.sh 尚未收录**：`skills.sh/api/search?q=chemometrics` 返回 0 条，仓库页 404。
   该目录没有提交表单，需要一次真实安装触发索引：`npx skills add xingwang0/chemometrics-agent-skill -g`。
 
+## [1.2.10] - 2026-11-28
+
+### 修复
+
+第三轮做「二分类强不平衡 + 多目标表格回归」测试（UCI German Credit 1000×20、UCI Energy
+Efficiency 768×8 双响应）时暴露的问题：
+
+- **二分类的 OOF 概率只落一列，逐类 AUROC 与阈值表全部静默为空**：`cv.py` 对二分类只写
+  `proba`（正类概率），而报告层按 `p0/p1` 找列。German 的 T7b「AUROC(OVR)」两行全空，
+  T8 因 `1 not in pcols` 直接不生成——没有任何报错。现在 `_classification_detail` 在
+  `proba` 存在且二分类时把它当 p1、p0 = 1 − p1，并在 T7b 正常给出逐类 AUROC。
+- **二分类没有阈值敏感性，audit 却一直建议「用 Youden」**：管线所有硬标签指标固定 0.5，
+  German xgb 在 0.5 下 accuracy 0.709（≈ 先验 0.700）而 sensitivity 只有 0.138，读者仅凭
+  T2 会以为模型「能用」。新增表 T8：同一组 OOF 概率在 0.5 / Youden / 先验三个阈值下的
+  sensitivity、specificity、balanced accuracy、F1(正类)、MCC、accuracy；0.5 行与 T2 逐位
+  对齐，Youden 行显式标注「事后选、含乐观偏差」。audit 的类别不平衡建议与
+  `_youden_threshold` docstring 同步改为「管线固定 0.5，敏感性见表 T8；论文声称 Youden
+  必须内层折选择并记录每折阈值」。
+- **类别列被静默丢弃，报告仍像「用了全部变量」**：German Credit 20 列里 13 列是字符串类别
+  （checking_status / purpose / housing…），旧版只把它们记为一条 info「载入说明」，模型实际
+  只用 7 列，xgb AUROC 0.668，而文献 logistic 0.78。新增 `Dataset.dropped_non_numeric`，
+  审计在丢弃 ≥3 列时升为 **WARN**（「13 列，占原始特征 65%，模型实际只用 7 列」），
+  limitations 强制写入「特征矩阵只用了 7 列，另 13 列类别变量不可见」。整数编码的标称列
+  不会被 dtype 识别，审计建议里明确要求同样显式 one-hot。
+
+### 验证
+
+- 自检 59/59：新增第 59 项断言 T8 的 0.5 行与 `classification_metrics` 一致、三口径阈值
+  齐全、多分类不得产出 T8。
+- German Credit（1000 行，700 good / 300 bad，先验 70%）：默认 7 数值列 xgb 折均值
+  accuracy 0.709 / AUROC 0.668 / balanced accuracy 0.546 / sensitivity 0.138 /
+  specificity 0.954 / MCC 0.166；T8 的 Youden（0.310）把 sensitivity 提到 0.594，但
+  accuracy 反降到 0.644。同一份数据 one-hot 到 61 列后 xgb accuracy 0.761 / AUROC 0.799、
+  logreg 0.719 / 0.788，与文献 LR 0.74 / AUC 0.78 对齐——0.13 的 AUROC 差距就是类别列被丢
+  的代价。
+- Energy Efficiency 双目标（768 行×8 特征）：heating gbr 折均值 R² 0.9986 / RMSE 0.370
+  kWh/m² / RPD 27.7；cooling gbr 0.9922 / 0.830 / 11.7。`target_unit` 逐目标字典写法生效，
+  fan-out 出 `01_heating_load`、`02_cooling_load` 两个独立子 run，索引不跨目标排名。
+- 回归校验：玉米蛋白 / wine / concrete 的 T2 数字逐位不变。
+
+## [1.2.9] - 2026-11-28
+
+### 修复
+
+换方向做「分类 + 表格回归」测试（UCI Wine Quality red 1599×11 六分类、UCI Concrete 1030×8 回归）
+时暴露的问题：
+
+- **耗时标定在分类任务上必失败**：`run_pipeline.py` 的 dry-run 把分类 y 无条件转成 str，
+  与 pipeline 内部的 `classes=[0..K-1]` 对不上，抛 ValueError 后静默退化成经验系数。
+  现在只在 dtype 为 object 时转 str。
+- **多分类下 VIP 被判「无法判定」**：`_pls_cv_r2` 只读 `r2/r2_mean`，分类的
+  `metrics_summary.csv` 没有该列，模型明明叫 `plsda` 也被判成「CV 里没有 PLS 结果」。
+  改为按任务取指标（回归 R² ≥ 0.10、分类 AUROC ≥ 0.65），`vip.csv` 增
+  `pls_metric / pls_value`，报告「为什么不用 PLS」分支同步换词。
+- **报告对表格/分类照抄光谱措辞**：第八节固定写「贡献最大的波段（打乱该段后的 R² 下降）」、
+  F7 图注固定写「重要性-波数映射」、表 T6 固定写「波段级 / ΔR² 均值」。表格数据的列是
+  alcohol/sulphates，指标是 AUROC。md / html / 图注 / 表头 / 附录图目录全部按任务与列名
+  类型切换（特征↔波段、ΔR²↔ΔAUROC）。
+- **T2 性能表缺 accuracy**：分类配置声明了 accuracy，但表格列白名单只到
+  r2/rmse/mae/rpd/auc，主指标 accuracy 根本没进表。补入 `accuracy_mean/_sd`。
+- **审计知道有重复行，却不知道它跨了 group**：UCI wine 有 240 行特征向量完全重复，每行各自
+  一个 sample_id；旧文案「确保 sample_id 相同（分组会处理）」等于告诉作者已经处理好了。
+  新增 `_duplicate_structure()`：给出重复簇数与副本落在不同 group 的行数，命中即写明
+  「训练折里已有同一行，OOF 偏高」，报告 limitations 同步；并入第 56 项自检。
+- **分类任务没有混淆矩阵，accuracy 掩盖「从不预测稀有类」**：UCI wine 六分类 rf 折均值
+  accuracy 0.695，但类别 3（n=10）与 4（n=53）的 OOF 召回分别是 0.000 / 0.006——模型从
+  不预测这两个类，读者从任何一张图都看不出来。新增表 T7（OOF 混淆矩阵，行归一化为逐类召回）、
+  T7b（逐类 precision/recall/F1/support/OVRAUC）与图 F9（混淆矩阵热图）；报告正文在
+  召回 ≤ 0.05 时点名这些类别，并说明「accuracy 由多数类主导，不能声称能识别全部等级」。
+- **表格数据的 F7 图注仍写「波数映射 / 平均谱」**：`FIGURE_INDEX`、HTML `_FIG_CAPTION`、
+  正文图目录与附录图目录都写死光谱措辞；Concrete 的 8 列是 cement/age，根本没有波数轴。
+  按列名类型切换为「重要性-特征排序」，并给色标轴加上 `_sml_colorbar` 标记，避免 figure_qc
+  把色标轴当成「缺 x 轴标签」误报。
+- **版本号三方不一致**：`SKILL.md` 已写到 1.2.8，`sml.__version__` 还停在 1.2.5，
+  每份 `provenance.json` 都在记录 1.2.5。统一为 1.2.9，并加第 57 项自检把
+  SKILL.md / `sml.__version__` / CHANGELOG 最新条目三方对齐；第 58 项断言「召回 ≤ 0.05
+  的类别必须被点名」。
+
+### 验证
+
+- 58/58 自检通过。
+- Wine red 六分类（1599 行，类别 681/638/199/53/18/10）：rf 折均值 accuracy 0.695 / AUROC 0.855，
+  文献 10 折多分类准确率 62.4%；去重后（1359 行）的敏感性对照单独落盘，用于量化 240 行
+  重复带来的偏高。
+- Concrete 回归（1030 行）：gbr 折均值 R² 0.936 / RMSE 4.22 MPa，文献 GBM 20 次随机划分
+  R² 0.914 ± 0.011、XGBoost 0.91 / RMSE 4.37。
+
+## [1.2.8] - 2026-11-28
+
+### 修复
+
+用两套公开实验数据（Eigenvector 玉米 NIR 80×700、Tecator 肉品 NIR 240×100）做回归测试时暴露的问题：
+
+- **适用域结论与写作提示自相矛盾**：mixed 分支只覆写了顶层 `conclusion`，`author_note`
+  仍是第一个模型的「AD 有效。可明确宣称……」，`report.md` 的「写作提示」把它原样印出，
+  与同一节的「各模型不一致」并排出现（1.2.5「Methods 取第一个模型」漏掉的另一半）。
+  新增 `ad.mixed_author_note()` 统一生成两者，并把该断言并入第 55 项自检。
+- **ΔR² 数量级失真**：光谱块高度共线时，置换整段波长会把 R² 打到 −490，报告照抄成
+  「贡献最大的波段 ΔR² = 493.9」。`interp` 现在落盘 `score_permuted` / `permuted_negative`；
+  报告对转负波段改用「ΔR² ≥ 基准 R²」的下界写法并说明「该段被换掉后模型整体失效」；
+  F7 在饱和情形（最大 ΔR² > 5 × 基准）改用「占正贡献比例」，个别波段转负只做截顶并标注；
+  HTML 的表 T6 同步注明。
+- **审计不查跨批次重叠**：`holdout_batch` / `loo_batch` 的全部说服力来自「测试批没见过」，
+  但全表「完全重复行」不说明重复是否跨进了测试批。新增 `_batch_overlap()`：逐批给
+  完全重复行数、测试批到训练批的中位最近邻距离，以及它与训练集内部间距的比值；
+  命中即 warn，报告 limitations 同步写入（Tecator 的 T 批有 7 行与训练批逐点相同）。
+- **验证方案段写错折数**：「外层：`outer.n_splits` 折分组 CV」在 `holdout_batch` /
+  `loo_batch` / `holdout_random` 下与实际折数不符（Tecator 的留一批次被写成「5 折分组 CV」）；
+  同一处的 limitations 还固定写「本次未执行留一批次外部验证」。两处均改为按策略分支、
+  折数取 `cv_summary.json` 实际值。
+- **置换 p 值下限没有提示**：`n_perm=50` 时 p 只能取到 1/51=0.0196，报告写 p=0.020
+  容易被读成「刚好显著」。p 落在下限时补一句「这是最小可能值，真实 p 只会更小」。
+- **收敛警告刷屏**：enet/lasso 在共线光谱上逐折抛 `ConvergenceWarning`（单次运行数百条），
+  把 `[sml]` 进度和真告警一起冲掉。统一静音，排查时设 `SML_SHOW_CONVERGENCE=1` 恢复。
+
+### 验证
+
+- 55/55 自检通过；`cv/oof_predictions.csv` 逐行重算的 R²/RMSE 与报告逐位一致。
+- Tecator：本技能 PLS 外部测试 RMSEP 1.683%，独立实现 1.670%；原始谱 PLS 2.809%，文献 2.7%。
+- Corn：蛋白 OOF R² 0.904（文献 MP5 PLSR 0.917），水分 0.852（文献 0.827）。
+
 ## [1.2.7] - 2026-11-27
 
 ### 变更

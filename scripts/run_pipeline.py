@@ -104,7 +104,10 @@ def _calibrate_fit_seconds(ctx, specs, max_rows: int = 400, max_cols: int = 400,
         tname = ds.target_names[0]
         y_all = np.asarray(ds.targets[tname])
         ys = y_all[rows]
-        if ds.task != "regression":
+        # 分类的 y 在 io_data 里已编码成 int64（0..K-1），口径与 CV 完全一致。
+        # 旧实现无条件转 str，于是标定时 fit 拿到 object 标签、与 pipeline 里的
+        # classes=[0..K-1] 对不上，每次都在 ValueError 上退化成经验系数估算。
+        if ds.task != "regression" and getattr(ys, "dtype", None) == object:
             ys = np.array([str(v) if pd.notna(v) else "NA" for v in ys], dtype=object)
         cands = cfg["preprocess"]["candidates"]
 

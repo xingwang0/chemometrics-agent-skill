@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from . import present
 from .utils import as_path, ensure_dir, info, read_json, write_text
 
@@ -234,13 +236,16 @@ def _td(v: Any, col: Any, unit: Any) -> str:
 
 
 def _table_html(df, caption: str, note: str = "", unit: Any = None,
-                max_rows: int | None = None, first_col_strong: bool = False) -> str:
+                max_rows: int | None = None, first_col_strong: bool = False,
+                labels: dict | None = None) -> str:
     if df is None or getattr(df, "empty", True):
         return ""
     rows = df.head(max_rows) if max_rows else df
     cols = list(rows.columns)
+    overrides = labels or {}
     head = "".join(
-        f'<th scope="col">{_esc(_col_label(c))}{_col_unit(c, unit)}</th>' for c in cols)
+        f'<th scope="col">{_esc(overrides.get(c) or _col_label(c))}{_col_unit(c, unit)}</th>'
+        for c in cols)
     body = []
     for _, r in rows.iterrows():
         cells = "".join(_td(r[c], c, unit) for c in cols)
@@ -256,13 +261,29 @@ def _kv(rows: list[tuple[str, str]]) -> str:
     return f'<table class="kv"><tbody>{body}</tbody></table>'
 
 
-def _figure(code: str, figures: dict, note: str = "") -> str:
+def _is_wavelength(name: Any) -> bool:
+    """特征名是否是波数/波长（纯数字且量级 ≥ 1）；表格列名一般是 alcohol、cement。"""
+    try:
+        return abs(float(str(name).strip())) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _classes_never_predicted(rep) -> list[str]:
+    """逐类 recall ≤ 0.05 的类别：这些类模型实际上从不预测。"""
+    if rep is None or getattr(rep, "empty", True) or "recall" not in getattr(rep, "columns", []):
+        return []
+    bad = rep[pd.to_numeric(rep["recall"], errors="coerce").fillna(0) <= 0.05]
+    return bad["类别"].astype(str).tolist()
+
+
+def _figure(code: str, figures: dict, note: str = "", caption: str | None = None) -> str:
     paths = (figures or {}).get(code) or []
     png = next((p for p in paths if str(p).lower().endswith(".png")), None)
     if not png:
         return ""
     rel = "../figures/" + Path(str(png)).name
-    caption = _FIG_CAPTION.get(code, code)
+    caption = caption or _FIG_CAPTION.get(code, code)
     alt = f"{code} {caption}"
     if note:
         alt += f"；{note}"
@@ -281,6 +302,7 @@ _FIG_CAPTION = {
     "F6": "Y-randomization 零分布",
     "F7": "重要性-波数映射",
     "F8": "模型比较（点=均值，细线=±SD，粗线=95% CI）",
+    "F9": "OOF 混淆矩阵（行归一化＝逐类召回）",
 }
 
 
@@ -480,6 +502,8 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     unit = getattr(ds, "target_unit", None)
     unit_known = present.normalize_unit(unit)[1] != "missing"
     failed = (cv_summary or {}).get("failed_models") or {}
+    # 表格数据（alcohol/cement 这类列名）没有波数与平均谱，图注不能照抄「波数映射」。
+    spectral = any(_is_wavelength(n) for n in getattr(ds, "feature_names", []) or [])
     badges = present.badges_for(block=block, perm=perm, ad_eval=ad_eval,
                                 unit_known=unit_known, failed_models=failed)
 
@@ -495,6 +519,11 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     body = [_kpis(block, ds.task, unit)]
     if best_line:
         body.append(f"<p>{_md_inline(best_line)}</p>")
+    if ds.task == "classification":
+        _bad = _classes_never_predicted(tables.get("T7b_class_report"))
+        if _bad:
+            body.append(f'<p class="note">⚠ 类别 {", ".join(_bad)} 的 OOF 召回 ≤ 0.05：'
+                        "accuracy / AUROC 只对主要类别成立，逐类召回见第四章 T7b 与图 F9。</p>")
     if badges:
         body.append(f"<p>{_badges(badges)}</p>")
     if perm and not perm.get("error") and perm.get("conclusion"):
@@ -560,6 +589,22 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
             "† = 该行有效折不足，*_mean 不可引用，请看同行的池化列。"
             "口径列 metric_basis / n_folds_ok 必须与性能一起读。", unit=unit))
     body.append(_figure("F1", figures, "统计量为 OOF 池化口径，与表 T2 的repeat 均值口径不可混引"))
+    _rep = tables.get("T7b_class_report")
+    if _rep is not None and not _rep.empty:
+        body.append(_table_html(tables.get("T7_confusion"), "表 T7　OOF 混淆矩阵（行归一化＝逐类召回）",
+                                "行内百分比是该真实类被判成各类的比例；空白格表示该折外样本从未被预测成该类"))
+        body.append(_table_html(_rep, "表 T7b　逐类 precision / recall / F1 / support",
+                                "support 为 OOF 池化后的行数（含 repeats）；recall≤0.05 的类别须在正文点名"))
+        bad = _classes_never_predicted(_rep)
+        if bad:
+            body.append(f'<p class="note">⚠ 类别 {", ".join(bad)} 的 OOF 召回 ≤ 0.05：'
+                        "accuracy 由多数类主导，不能据此声称「能识别全部等级」。</p>")
+    _thr = tables.get("T8_threshold")
+    if _thr is not None and not _thr.empty:
+        body.append(_table_html(_thr, "表 T8　阈值敏感性（同一组 OOF 概率，只换判正阈值）",
+                                "管线所有硬标签指标固定 0.5 阈值；Youden 一行在这份 OOF 上事后选，含乐观偏差，"
+                                "只能说明阈值的影响，不能当作可外推性能"))
+    body.append(_figure("F9", figures, "行归一化为逐类召回；罕见类整行为 0 时，accuracy 仍可能好看"))
     body.append(_figure("F3", figures, "逐折分布：箱体窄且散点集中才说明模型稳定"))
     t3 = tables.get("T3_per_fold")
     if t3 is not None and not t3.empty:
@@ -623,13 +668,34 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     body = []
     t6 = tables.get("T6_band_importance")
     if t6 is not None and not t6.empty:
-        body.append(_table_html(t6, "表 T6　波段级置换重要性", "ΔR² 为打乱该波段后的性能下降",
-                                max_rows=20))
+        # 置换把 R² 打到负值时，ΔR² 会出现 400+ 的数：它度量「模型依赖该段」，
+        # 不是可与其它波段比大小的差值，表下必须说明（与 report.md 同口径）。
+        n_neg = 0
+        if "permuted_negative" in t6.columns:
+            n_neg = sum(1 for v in t6["permuted_negative"]
+                        if str(v).strip().lower() in {"true", "1", "1.0", "yes"})
+        _mlab = "AUROC" if ds.task == "classification" else "R²"
+        _dlab = "ΔAUROC" if ds.task == "classification" else "ΔR²"
+        _unit = "波段" if spectral else "特征"
+        note = (f"{_dlab} 为打乱该{_unit}后的 {_mlab} 下降"
+                + ("（波段内波长同时置换）" if spectral else ""))
+        if n_neg:
+            note += (f"；其中 {n_neg} 个{_unit}的置换使 {_mlab} 转负（score_permuted<0），"
+                     f"这些行的 {_dlab} 只表示「打乱该{_unit}后模型整体失效」，"
+                     f"绝对值不可与其它{_unit}比较")
+        _labels = {"label": "标签" if spectral else "特征",
+                   "delta_mean": f"{_dlab} 均值", "delta_sd": f"{_dlab} 标准差"}
+        body.append(_table_html(t6, f"表 T6　{_unit}级置换重要性", note, max_rows=20,
+                                labels=_labels))
     t6b = tables.get("T6b_vip")
     if t6b is not None and not t6b.empty:
         body.append(_table_html(t6b, "表 T6b　VIP（前 100 个特征）",
                                 "VIP > 1 只是经验阈值，不等于统计显著", max_rows=20))
-    body.append(_figure("F7", figures, "柱=重要性，底图=平均谱；两者共享波数轴"))
+    if spectral:
+        body.append(_figure("F7", figures, "柱=重要性，底图=平均谱；两者共享波数轴"))
+    else:
+        body.append(_figure("F7", figures, "柱=重要性（逐列置换）；表格数据无平均谱底图",
+                            caption="重要性-特征排序"))
     sections.append(("explain", "".join(body)))
 
     # 九、局限
@@ -643,8 +709,10 @@ def build_html(ctx, best_model: str, tables: dict, block: dict, *,
     sections.append(("repro", _section_repro(ctx, prov, unit)))
 
     # 十一～十四
-    gallery = "".join(_figure(c, figures) for c in
-                      ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8"))
+    # 附录图目录与正文用同一套图注：F7 在表格数据下不能写「波数映射」（正文已改，这里漏改会图文打架）
+    _cap = {} if spectral else {"F7": "重要性-特征排序"}
+    gallery = "".join(_figure(c, figures, caption=_cap.get(c)) for c in
+                      ("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"))
     sections.append(("gallery", f'<div class="gallery">{gallery}</div>'
                      if gallery else '<p class="note">本 run 没有可用图。</p>'))
     sections.append(("legend", present.legend("html")))

@@ -96,6 +96,7 @@ FIGURE_INDEX = {
     "F6": "Y-randomization 零分布",
     "F7": "重要性-波数映射",
     "F8": "模型比较（95% CI；† = 该行折均值不可引用，见图内标注）",
+    "F9": "混淆矩阵（仅分类；OOF 池化，行归一化为逐类召回）：罕见类若从不被预测，accuracy 仍可能好看",
 }
 
 
@@ -200,6 +201,9 @@ def figure_qc(fig, code: str) -> list[str]:
             other is not a and a.get_shared_x_axes().joined(a, other)
             and other.get_position().y0 < a.get_position().y0
             for other in axes)
+        # colorbar 是一根独立的坐标轴，它不需要 x 轴标题；把色标轴算成「缺标签」是误报
+        if getattr(a, "_sml_colorbar", False):
+            continue
         for axis in ("x", "y"):
             if axis == "x" and shares_x_below:
                 continue
@@ -595,6 +599,18 @@ def _spectral_axis(ds) -> tuple[np.ndarray | None, np.ndarray | None]:
     return None, None
 
 
+def _annotate_capped(ax, n_cap: int, base_score: float, share_mode: bool = False) -> None:
+    """被截顶/改用占比的柱子必须说明，否则读者会把柱高当成真实 ΔR²。"""
+    if not n_cap:
+        return
+    if share_mode:
+        ax.text(0.99, 0.99, f"{n_cap} 个波段置换后 R² 转负，柱高为占正贡献比例",
+                transform=ax.transAxes, ha="right", va="top", fontsize=7, color="#666666")
+    elif np.isfinite(base_score):
+        ax.text(0.99, 0.99, f"{n_cap} 个波段打乱后 R²<0，柱高按 ≥{base_score:.3f} 截顶",
+                transform=ax.transAxes, ha="right", va="top", fontsize=7, color="#666666")
+
+
 def fig_importance(imp: pd.DataFrame, ds, out_dir: Path, cfg: dict,
                    top_k: int = 15) -> list[Path]:
     if imp.empty:
@@ -607,12 +623,35 @@ def fig_importance(imp: pd.DataFrame, ds, out_dir: Path, cfg: dict,
 
     labels = ([str(v) for v in bands["label"]] if "label" in bands
               else [f"f{i}" for i in range(len(bands))])
+    # 置换把 R² 打到负值时，ΔR² 可以到 490+：柱状图会被一根柱子压平，
+    # 其余波段全看不见。这里按「基准分」截顶显示，被截的柱子另行标注。
+    cap_mask = (bands["permuted_negative"].astype(bool).to_numpy()
+                if "permuted_negative" in bands.columns
+                else np.zeros(len(bands), dtype=bool))
+    base_score = (float(pd.to_numeric(bands["base_score"], errors="coerce").iloc[0])
+                  if "base_score" in bands.columns else float("nan"))
+    # 只有「大多数波段都被打到负 R²」的饱和情形才改用占比：判据是最大 ΔR² 超过基准分
+    # 的 5 倍（此时截顶会把二十多根柱子压成等高，图失去信息）。个别波段转负只做截顶。
+    _dmax = float(pd.to_numeric(bands["delta_mean"], errors="coerce").max())
+    share_mode = (bool(cap_mask.any()) and ("share" in bands.columns)
+                  and np.isfinite(base_score) and base_score > 0
+                  and _dmax > 5.0 * base_score)
+    ylabel = ("占正贡献比例（%）" if share_mode else "ΔR²（置换后下降）")
+
+    def _bar_vals(order: np.ndarray | None = None) -> np.ndarray:
+        if share_mode:
+            v = pd.to_numeric(bands["share"], errors="coerce").to_numpy(dtype=float) * 100.0
+        else:
+            v = pd.to_numeric(bands["delta_mean"], errors="coerce").to_numpy(dtype=float)
+            v = np.where(cap_mask, base_score, v)
+        return v if order is None else v[order]
+
     wl0, _col0 = _spectral_axis(ds)
     if (not has_center) and wl0 is None:
         # 非光谱输入（工艺参数等表格数据）：没有波数轴，横轴必须用特征名。
         # 旧实现落到 band_index 分支，横轴只剩「波段序号」、读不出哪个特征重要，
         # 下半幅「平均谱」还是空 panel（只有一个「—」刻度），整张图等于废掉。
-        y = bands["delta_mean"].to_numpy(dtype=float)
+        y = _bar_vals()
         xpos = np.arange(len(bands))
         fig, ax = plt.subplots(figsize=(_fsize("F7", (4.8, 4.2))[0],
                                        max(2.6, 0.42 * len(bands) + 1.4)))
@@ -621,10 +660,13 @@ def fig_importance(imp: pd.DataFrame, ds, out_dir: Path, cfg: dict,
         ax.set_xticks(xpos)
         ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8)
         ax.set_xlabel("特征")
-        ax.set_ylabel("ΔR²（置换后下降）")
-        ax.set_title("特征级置换重要性：打乱该特征后的性能损失", fontsize=_font("title", 9))
+        ax.set_ylabel(ylabel)
+        ax.set_title(("特征级置换重要性：各特征占正贡献比例"
+                      if share_mode else "特征级置换重要性：打乱该特征后的性能损失"),
+                     fontsize=_font("title", 9))
         ax.grid(axis="y", alpha=0.25, lw=0.5)
         ax.tick_params(labelsize=_font("tick", 7.5))
+        _annotate_capped(ax, int(cap_mask.sum()), base_score, share_mode)
         fig.tight_layout()
         return _save(fig, out_dir, "F7_importance_map", cfg)
 
@@ -637,7 +679,7 @@ def fig_importance(imp: pd.DataFrame, ds, out_dir: Path, cfg: dict,
         x = pd.to_numeric(bands["center"], errors="coerce").to_numpy(dtype=float)
         order = np.argsort(x)
         x = x[order]
-        y = bands["delta_mean"].to_numpy(dtype=float)[order]
+        y = _bar_vals(order)
         spacing = float(np.median(np.diff(x))) if x.size > 2 else 1.0
         width = abs(spacing) * 0.85 if np.isfinite(spacing) and spacing != 0 else 1.0
         ax.bar(x, y, width=width, color=_color(0), alpha=0.85)
@@ -648,15 +690,18 @@ def fig_importance(imp: pd.DataFrame, ds, out_dir: Path, cfg: dict,
         invert = True
     else:
         x = bands["band_index"].to_numpy(dtype=float)
-        y = bands["delta_mean"].to_numpy(dtype=float)
+        y = _bar_vals()
         ax.bar(x, y, color=_color(0), alpha=0.85, width=0.85)
         xlabel = "波段序号"
         invert = False
 
-    ax.set_ylabel("ΔR²（置换后下降）")
-    ax.set_title("波段级置换重要性：打乱整段波长后的性能损失", fontsize=_font("title", 9))
+    ax.set_ylabel(ylabel)
+    ax.set_title(("波段级置换重要性：各波段占正贡献比例（置换后 R² 转负）"
+                  if share_mode else "波段级置换重要性：打乱整段波长后的性能损失"),
+                 fontsize=_font("title", 9))
     ax.grid(axis="y", alpha=0.25, lw=0.5)
     ax.tick_params(labelsize=_font("tick", 7.5))
+    _annotate_capped(ax, int(cap_mask.sum()), base_score, share_mode)
 
     if wl is not None and col_idx is not None:
         mean_spec = np.nanmean(np.asarray(ds.X, dtype=float)[:, col_idx], axis=0)
@@ -717,6 +762,62 @@ def fig_compare(ci: pd.DataFrame, summary: pd.DataFrame, task: str,
 
 
 # --------------------------------------------------------------------------- #
+def fig_confusion(oof: pd.DataFrame, best_model: str, label_map, out_dir: Path,
+                  cfg: dict) -> list[Path]:
+    """OOF 混淆矩阵（行归一化＝逐类召回）。
+
+    分类任务缺了它，报告只剩 accuracy 一个数：六分类里两个小众类召回为 0、
+    模型从不预测它们，accuracy 照样 0.695，读者无法从任何一张图看出这件事。
+    """
+    if oof.empty or not best_model:
+        return []
+    sub = oof[oof["model"].astype(str) == str(best_model)]
+    if sub.empty or "y_true" not in sub or "y_pred" not in sub:
+        return []
+    yt = pd.to_numeric(sub["y_true"], errors="coerce")
+    yp = pd.to_numeric(sub["y_pred"], errors="coerce")
+    ok = yt.notna() & yp.notna()
+    if int(ok.sum()) == 0:
+        return []
+    y_true = yt[ok].to_numpy(dtype=int)
+    y_pred = yp[ok].to_numpy(dtype=int)
+    labels = sorted(set(np.unique(y_true)) | set(np.unique(y_pred)))
+    from sklearn.metrics import confusion_matrix
+
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    frac = cm / np.maximum(cm.sum(axis=1, keepdims=True), 1)
+    names = [_class_name(int(c), label_map) for c in labels]
+
+    plt = _plt(cfg)
+    n = len(labels)
+    # 单元格里要放「计数 + 行内比例」两行字：类别多时必须放大画布、缩小字号，
+    # 否则相邻格的文字会互相压住（6 类时 4.4 in 宽就会出现）。
+    w = max(4.4, 0.95 * n + 1.4)
+    h = max(3.9, 0.82 * n + 1.5)
+    fig, ax = plt.subplots(figsize=(w, h))
+    im = ax.imshow(frac, cmap="viridis", vmin=0.0, vmax=1.0, aspect="equal")
+    ax.set_xticks(np.arange(n))
+    ax.set_yticks(np.arange(n))
+    ax.set_xticklabels(names)
+    ax.set_yticklabels(names)
+    ax.set_xlabel("预测类别")
+    ax.set_ylabel("真实类别")
+    cell_fs = _font("annotation_small", 6.4) if n <= 4 else 5.6
+    for i in range(n):
+        for j in range(n):
+            v = float(frac[i, j])
+            ax.text(j, i, f"{int(cm[i, j])}\n{v * 100:.1f}%", ha="center", va="center",
+                    fontsize=cell_fs, linespacing=0.95,
+                    color="white" if v > 0.55 else "#222222")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    cbar.ax._sml_colorbar = True   # 让 figure_qc 的轴标题检查跳过色标轴
+    cbar.set_label("行归一化比例（= 召回）", fontsize=_font("annotation_small", 6.4))
+    ax.set_title(f"OOF 混淆矩阵（{best_model}）", fontsize=_font("title", 9))
+    ax.tick_params(labelsize=_font("tick", 7.5))
+    fig.tight_layout()
+    return _save(fig, out_dir, "F9_confusion", cfg)
+
+
 def render_all(ctx, best_model: str | None = None) -> dict[str, list[str]]:
     """从 run 目录读取产物，渲染全部可用的图。缺数据的图自动跳过并记录。"""
     cfg = ctx.cfg
@@ -751,6 +852,8 @@ def render_all(ctx, best_model: str | None = None) -> dict[str, list[str]]:
 
     _do("F1", fig_pred_obs, oof, best_model, task, fig_dir, cfg, ds.label_map)
     _do("F2", fig_residual, oof, best_model, fig_dir, cfg, task)
+    if task == "classification":
+        _do("F9", fig_confusion, oof, best_model, ds.label_map, fig_dir, cfg)
     if not folds.empty:
         _do("F3", fig_cv_dist, folds, task, fig_dir, cfg)
 

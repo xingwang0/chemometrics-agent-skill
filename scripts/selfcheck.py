@@ -1413,7 +1413,20 @@ def _ad_summary_consistency() -> tuple[bool, str]:
     untested = {"per_model": {m: {"ad_verdict": None, "ad_effective": None} for m in ("a", "b")}}
     if ad_verdict_summary(untested)["state"] != "untested":
         return _fail("全部未检验应判 untested，不能混进 none_effective")
-    return _ok("mixed 点名有效模型且显式写「不一致」；all_effective / untested 分支正确")
+
+    # author_note 必须与 conclusion 同口径：mixed 时若仍沿用首个模型的「AD 有效」，
+    # report 的「写作提示」会与「不一致」结论并排出现，作者照抄就自相矛盾。
+    from sml.ad import mixed_author_note
+    note = mixed_author_note(["svr"], 5)
+    if "svr" not in note:
+        return _fail(f"mixed 的 author_note 没有点名有效模型：{note}")
+    if "AD 有效。" in note or "可明确宣称" in note:
+        return _fail(f"mixed 的 author_note 仍在概称「AD 有效」：{note}")
+    for need in ("逐模型", "limitations"):
+        if need not in note:
+            return _fail(f"mixed 的 author_note 缺「{need}」：{note}")
+    return _ok("mixed 点名有效模型且显式写「不一致」；author_note 同口径；"
+               "all_effective / untested 分支正确")
 
 
 @check("reporting", "h* 的两个 n 必须各自标注，且不得互相冒充")
@@ -1450,6 +1463,130 @@ def _leverage_dual_n() -> tuple[bool, str]:
         return _fail("判域阈值超过了样品口径的 h*，会与 ad_scores.csv 对不上")
     return _ok(f"行口径 {d['h_star_rows']:.3f}（n={d['n_rows']}）/ 样品口径 "
                f"{d['h_star_groups']:.3f}（n={d['n_groups']}），各自标注且不互相冒充")
+
+
+@check("reporting", "重复行跨 group：必须计入且不得超过重复行总数")
+def _dup_cross_group() -> tuple[bool, str]:
+    """UCI wine 有 240 行完全重复、每行各自一个 sample_id：分组 CV 拦不住。
+
+    审计若只说「240 行重复」而不说「跨 group」，作者会以为分组 CV 已处理。
+    这条断言同时卡住计数口径：副本数不能把簇内的原始行也算进去（曾报出 460 > 240）。
+    """
+    from sml.audit import _duplicate_structure
+
+    X = np.array([[1.0, 2.0], [1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [5.0, 6.0], [7.0, 8.0]])
+    n_dup = int(len(X) - len(np.unique(X, axis=0)))
+
+    class _DS:  # 只用到 .X / .groups
+        pass
+
+    split_groups = _DS()
+    split_groups.X, split_groups.groups = X, np.array(list("abcdef"), dtype=object)
+    same_groups = _DS()
+    same_groups.X, same_groups.groups = X, np.array(["a", "a", "c", "d", "d", "f"], dtype=object)
+
+    r_split = _duplicate_structure(split_groups)
+    r_same = _duplicate_structure(same_groups)
+    if r_split["duplicate_rows_cross_group"] != n_dup:
+        return _fail(f"副本落在不同 group 的行数应为 {n_dup}，实际 "
+                     f"{r_split['duplicate_rows_cross_group']}")
+    if r_same["duplicate_rows_cross_group"] != 0:
+        return _fail(f"重复行在同一 group 内不应计入跨组，实际 {r_same['duplicate_rows_cross_group']}")
+    if r_split["duplicate_rows_cross_group"] > n_dup:
+        return _fail("跨组重复行数大于重复行总数：把簇内原始行也算进去了")
+    return _ok(f"{r_split['duplicate_clusters']} 组重复、跨组 {r_split['duplicate_rows_cross_group']} 行；"
+               f"同组重复计 0")
+
+
+@check("env", "版本号三方一致：SKILL.md / sml.__version__ / CHANGELOG 最新条目")
+def _version_sync() -> tuple[bool, str]:
+    """SKILL.md 写到 1.2.8、包内还停在 1.2.5，provenance 就会记录错的版本号。
+
+    引用一条 run 时要求「version + 三哈希」，版本号自己都对不上，等于没有溯源。
+    """
+    import re
+
+    root = SHIM.parent
+    skill_txt = (root / "SKILL.md").read_text(encoding="utf-8")
+    m = re.search(r'^\s*version:\s*"([0-9]+\.[0-9]+\.[0-9]+)"', skill_txt, re.MULTILINE)
+    if not m:
+        return _fail("SKILL.md 里找不到 version: \"x.y.z\"")
+    skill_ver = m.group(1)
+    from sml import __version__ as pkg_ver
+
+    change_txt = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    entries = re.findall(r"^## \[([0-9]+\.[0-9]+\.[0-9]+)\]", change_txt, re.MULTILINE)
+    if not entries:
+        return _fail("CHANGELOG.md 里没有已发布版本条目")
+    latest = entries[0]
+    if skill_ver != pkg_ver:
+        return _fail(f"SKILL.md version={skill_ver}，sml.__version__={pkg_ver}（provenance 会记错）")
+    if pkg_ver != latest:
+        return _fail(f"sml.__version__={pkg_ver}，CHANGELOG 最新条目={latest}")
+    return _ok(f"三方一致：{pkg_ver}")
+
+
+@check("reporting", "分类细则：召回≤0.05 的类别必须被点名（混淆矩阵不能只有 accuracy）")
+def _class_detail_guard() -> tuple[bool, str]:
+    """六分类里两个类召回为 0，accuracy 仍可 0.695：报告必须把这些类点出来。"""
+    from sml.report import _class_display, _classes_never_predicted
+
+    rep = pd.DataFrame({
+        "类别": ["3", "4", "5"],
+        "OOF 行数(support)": [30, 159, 2043],
+        "precision": [0.0, 0.043, 0.746],
+        "recall": [0.0, 0.006, 0.799],
+        "F1": [0.0, 0.011, 0.771],
+        "AUROC(OVR)": [0.61, 0.62, 0.83],
+    })
+    bad = _classes_never_predicted(rep)
+    if bad != ["3", "4"]:
+        return _fail(f"召回≤0.05 的类别应为 ['3','4']，实际 {bad}")
+    if _classes_never_predicted(rep.iloc[2:]) != []:
+        return _fail("召回 0.799 的类被误判为「从不预测」")
+    if _class_display(0, {0: "3"}) != "3":
+        return _fail("label_map 未把编码 0 还原成原始类别 3")
+    return _ok(f"点名 {bad}；高召回类不被误报；label_map 还原正确")
+
+
+@check("reporting", "二分类阈值表 T8：0.5 行必须与 T2 硬标签指标一致，且只在二分类生成")
+def _threshold_table_guard() -> tuple[bool, str]:
+    """German Credit 的 xgb：0.5 阈值 accuracy 0.709 但 sensitivity 0.138。
+
+    报告若不给阈值敏感性，作者只会写一句「用 Youden」而无法复核；给了就必须与 T2 对齐。
+    """
+    import numpy as np
+
+    from sml.metrics import classification_metrics, _youden_threshold
+    from sml.report import _threshold_sensitivity
+
+    rng = np.random.default_rng(0)
+    y = (rng.random(400) < 0.3).astype(int)
+    # 与正类弱相关的分数：保证 AUC 在 0.5~1 之间且 0.5 阈值下不会全判负
+    p = np.clip(0.3 + 0.35 * y + rng.normal(0, 0.18, 400), 0.01, 0.99)
+    sub = pd.DataFrame({"proba": p})
+    thr = _threshold_sensitivity(y, sub, {1: "proba"})
+    if thr is None or len(thr) != 3:
+        return _fail(f"二分类应产出 3 行阈值口径，实际 {None if thr is None else len(thr)}")
+    row05 = thr[thr["阈值"].round(4) == 0.5]
+    if len(row05) != 1:
+        return _fail("T8 缺少 0.5 这一行")
+    m = classification_metrics(y, p, n_classes=2, threshold=0.5)
+    for key, col in (("sensitivity", "sensitivity"), ("specificity", "specificity")):
+        if abs(float(row05[col].iloc[0]) - float(m[key])) > 1e-3:
+            return _fail(f"T8 的 0.5 行 {col}={row05[col].iloc[0]:.4f} 与 classification_metrics "
+                         f"{m[key]:.4f} 不一致，两处口径已分叉")
+    if len({round(float(t), 4) for t in thr["阈值"]}) < 2:
+        return _fail("三个阈值口径的阈值全相同，表没有信息量")
+    # 多分类（3 类、p0..p2）不得产出 T8
+    y3 = rng.integers(0, 3, 300)
+    sub3 = pd.DataFrame({"p0": rng.random(300), "p1": rng.random(300), "p2": rng.random(300)})
+    if _threshold_sensitivity(y3, sub3, {0: "p0", 1: "p1", 2: "p2"}) is not None:
+        return _fail("多分类不应产出二分类阈值表 T8")
+    if abs(_youden_threshold(y, p) - 0.5) < 1e-9 and m["auc"] > 0.6:
+        return _fail("Youden 阈值恒等于 0.5，选择逻辑可能未生效")
+    return _ok(f"0.5 行与 classification_metrics 一致（sens={m['sensitivity']:.3f}）；"
+               "三口径阈值 {:.2f}/{:.2f}/{:.2f}；多分类不产 T8".format(*thr["阈值"]))
 
 
 # --------------------------------------------------------------------------- #

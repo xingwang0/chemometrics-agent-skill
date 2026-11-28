@@ -23,8 +23,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from sml.interp import (  # noqa: E402
-    _vip_boot_job, band_permutation_importance, build_band_groups, coef_stability,
-    fit_fold_models, shap_values_safe, top_features, vip_scores,
+    _is_numeric_name, _vip_boot_job, band_permutation_importance, build_band_groups,
+    coef_stability, fit_fold_models, shap_values_safe, top_features, vip_scores,
 )
 from sml.io_data import impute_for_diagnostics  # noqa: E402
 from sml.models import build_pipeline, resolve_models  # noqa: E402
@@ -57,32 +57,39 @@ def _best_pls_components(ctx) -> int:
 # VIP 只有在 PLS 基线本身有预测力时才可解读：VIP 是 PLS 权重的衍生物，
 # PLS 学不到东西时 VIP 排序依然"看起来很专业"，但那是噪声的投影。
 VIP_MIN_PLS_R2 = 0.10
+# 分类任务的 PLS-DA 没有 R²，主指标是 AUROC：拿 R² 的阈值去卡它，永远判成「无法判定」。
+VIP_MIN_PLS_AUC = 0.65
+VIP_MIN_PLS_SKILL = {"regression": VIP_MIN_PLS_R2, "classification": VIP_MIN_PLS_AUC}
 
 
-def _pls_cv_r2(ctx) -> float | None:
-    """PLS 基线在 CV 里的主指标值（口径跟随该行的 metric_basis）。
+def _pls_baseline(ctx, task: str) -> tuple[float | None, str]:
+    """PLS(-DA) 基线在 CV 里的主指标值，以及它到底是什么指标。
 
-    实测反例：PLS 的 CV R² ≈ 0.01，VIP 首位给出 W_content，而置换重要性首位是
-    P_content —— 两个"最重要特征"方向完全不同。不标注来源模型的性能，读者只能
-    二选一凭感觉，而正确做法是"这个 VIP 不可引用"。
+    实测反例（Tecator / 玉米）：PLS 的 CV R² ≈ 0.01，VIP 首位给出 W_content，而置换
+    重要性首位是 P_content —— 两个"最重要特征"方向完全不同。不标注来源模型的性能，
+    读者只能二选一凭感觉，而正确做法是"这个 VIP 不可引用"。
+
+    1.2.9：旧实现只认回归的 r2/r2_mean，分类（模型名 plsda）在 metrics_summary 里
+    根本没有这一列，于是永远落到「CV 里没有 PLS 结果（无法判定）」——明明跑了 PLS-DA。
     """
     path = ctx.run_dir / "cv" / "metrics_summary.csv"
+    metric = "auc" if task == "classification" else "r2"
     if not path.exists():
-        return None
+        return None, metric
     try:
         df = pd.read_csv(path)
     except Exception:  # noqa: BLE001 —— 读不到就不判可靠性，不阻断 interp
-        return None
+        return None, metric
     if "model" not in df.columns:
-        return None
+        return None, metric
     sub = df[df["model"].astype(str).str.lower().str.startswith("pls")]
     if sub.empty:
-        return None
+        return None, metric
     row = sub.iloc[0]
     basis = str(row.get("metric_basis", "fold"))
-    col = "r2" if basis == "pooled" else "r2_mean"
+    col = metric if basis == "pooled" else f"{metric}_mean"
     val = pd.to_numeric(pd.Series([row.get(col, np.nan)]), errors="coerce").iloc[0]
-    return float(val) if np.isfinite(val) else None
+    return (float(val) if np.isfinite(val) else None), metric
 
 
 def run_interp(ctx) -> dict:
@@ -100,7 +107,11 @@ def run_interp(ctx) -> dict:
 
     band_size = int(cfg["interp"].get("band_size", 25))
     groups = build_band_groups(ds.feature_names, band_size)
-    info(f"可解释性：模型 {model_name}，波段分组 {len(groups)} 组（band_size={band_size}）")
+    # 表格数据（alcohol/cement 这类列名）没有"波段"，日志照抄"波段分组"会让作者以为
+    # 自己跑的是光谱数据（band_size=25 也会被误读成 25 个通道一段）。
+    _spectral = any(_is_numeric_name(n) for n in ds.feature_names)
+    info(f"可解释性：模型 {model_name}，{'波段' if _spectral else '特征'}分组 {len(groups)} 组"
+         + (f"（band_size={band_size}）" if _spectral else "（每列独立成组）"))
 
     result: dict = {"model": model_name, "band_size": band_size, "n_bands": len(groups),
                     "best_metric": best}
@@ -124,7 +135,13 @@ def run_interp(ctx) -> dict:
                  "报告会标注为不可用而不是列出 0.0000")
         else:
             top = imp.head(int(cfg["interp"].get("top_k", 20)))
-            result["top_bands"] = top[["label", "delta_mean", "share"]].to_dict(orient="records")
+            # score_permuted / permuted_negative 一并落盘：报告要在 ΔR² 大到不可比时
+            # 改用「≥ base」的下界写法，而不是照抄 493.9 这种数。
+            keep = [c for c in ("label", "delta_mean", "share", "score_permuted", "permuted_negative")
+                    if c in top.columns]
+            result["top_bands"] = top[keep].to_dict(orient="records")
+            result["base_score"] = float(imp.attrs.get("base_score", float("nan")))
+            result["n_permuted_negative"] = int(imp.attrs.get("n_permuted_negative", 0))
             positive = imp[imp["delta_mean"] > 0]
             result["n_positive_bands"] = int(len(positive))
             info(f"波段置换完成（{'全样本置换' if result['mode'] == 'all_rows' else '测试折置换'}）："
@@ -136,9 +153,11 @@ def run_interp(ctx) -> dict:
     # 2) VIP（PLS 是化学计量学基线，始终单独算）
     if cfg["interp"].get("vip", True):
         k = _best_pls_components(ctx)
-        pls_r2 = _pls_cv_r2(ctx)
+        pls_val, pls_metric = _pls_baseline(ctx, ds.task)
+        threshold = VIP_MIN_PLS_SKILL.get(ds.task, VIP_MIN_PLS_R2)
+        metric_label = "AUROC" if pls_metric == "auc" else "R²"
         # PLS 自己没预测力时，VIP 只是噪声的投影：照常算出来，但必须打上"不可引用"
-        reliable = pls_r2 is not None and pls_r2 >= VIP_MIN_PLS_R2
+        reliable = pls_val is not None and pls_val >= threshold
         try:
             y_vec = np.asarray(ds.targets.get(ctx.target, ds.y))
             # VIP/SHAP 是全量描述性分析，不是 CV 性能估计；缺失值用全量中位数
@@ -177,17 +196,19 @@ def run_interp(ctx) -> dict:
                 vip_df["vip_q975"] = np.quantile(B, 0.975, axis=0)
                 vip_df["stable_above_1"] = vip_df["vip_q025"] > 1.0
             # 可靠性标记写在每一行上，读 csv 的人一眼能看到"这份 VIP 来自多强的 PLS"
-            vip_df["pls_cv_r2"] = np.nan if pls_r2 is None else float(pls_r2)
+            vip_df["pls_metric"] = pls_metric
+            vip_df["pls_value"] = np.nan if pls_val is None else float(pls_val)
             vip_df["vip_reliable"] = bool(reliable)
             vip_df = vip_df.sort_values("vip", ascending=False).reset_index(drop=True)
             vip_df.to_csv(out_dir / "vip.csv", index=False, encoding="utf-8")
             result["vip"] = {"n_components": k, "n_above_1": int((vip > 1).sum()),
-                             "pls_cv_r2": pls_r2, "reliable": bool(reliable),
-                             "min_pls_r2": VIP_MIN_PLS_R2,
+                             "pls_metric": pls_metric, "pls_metric_label": metric_label,
+                             "pls_value": pls_val, "threshold": threshold,
+                             "reliable": bool(reliable),
                              "top": vip_df.head(10)[["feature", "vip"]].to_dict(orient="records")}
             if not reliable:
-                why = ("CV 里没有 PLS 结果（无法判定）" if pls_r2 is None
-                       else f"PLS 的 CV R²={pls_r2:.3f} < {VIP_MIN_PLS_R2:.2f}")
+                why = ("CV 里没有 PLS 结果（无法判定）" if pls_val is None
+                       else f"PLS 的 CV {metric_label}={pls_val:.3f} < {threshold:.2f}")
                 result["vip"]["note"] = (
                     f"{why}：VIP 来自一个没有预测力的模型，排序只是噪声的投影。"
                     f"它只能作为对照，不能当结论；请用置换重要性（importance.csv）或 SHAP。")

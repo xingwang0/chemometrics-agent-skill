@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import warnings
 from typing import Any
 
@@ -75,6 +76,16 @@ warnings.filterwarnings("ignore", message=r".*fmin_l_bfgs_b terminated abnormall
 warnings.filterwarnings(
     "ignore", category=UserWarning, module=r"sklearn\.gaussian_process\..*",
 )
+# 1.2.8：enet/lasso 在共线光谱上会逐折刷 sklearn 的 ConvergenceWarning
+# （单次运行实测数百条，把 [sml] 进度与真正的告警全冲掉）。这条警告对结果没有
+# 额外信息——坐标下降未收敛的后果已经体现在该折的指标里，且 search 会把 alpha
+# 往更正则的方向走。统一静音，但留一个开关给排查用。
+if os.environ.get("SML_SHOW_CONVERGENCE", "") not in {"1", "true", "TRUE"}:
+    try:
+        from sklearn.exceptions import ConvergenceWarning as _ConvWarn
+    except Exception:  # noqa: BLE001
+        _ConvWarn = UserWarning  # type: ignore[assignment,misc]
+    warnings.filterwarnings("ignore", category=_ConvWarn)
 
 
 # --------------------------------------------------------------------------- #

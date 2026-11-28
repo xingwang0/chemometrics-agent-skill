@@ -296,6 +296,110 @@ def _recommend(ds: Dataset, ginfo: dict[str, Any], cfg: dict) -> dict[str, Any]:
     return rec
 
 
+def _nn_distances(X_te: np.ndarray, X_tr: np.ndarray, chunk: int = 256) -> np.ndarray:
+    """每个测试行到训练集的最小欧氏距离（分块算，不建 n×m×p 的整块数组）。"""
+    out = np.empty(len(X_te), dtype=float)
+    for i in range(0, len(X_te), chunk):
+        block = X_te[i:i + chunk]
+        d2 = ((block[:, None, :] - X_tr[None, :, :]) ** 2).sum(-1)
+        out[i:i + chunk] = np.sqrt(d2.min(1))
+    return out
+
+
+def _duplicate_structure(ds: Dataset) -> dict:
+    """完全重复行落在几个 group 上。
+
+    只报「N 行完全重复」是不够的（UCI wine 就有 240 行重复）：如果每行各自一个
+    sample_id，分组 CV 也拦不住——同一个特征向量会同时出现在训练折和测试折，
+    OOF accuracy / R² 会被抬高，而读者从「未检测到重复测量」看不出来。
+    """
+    out = {"duplicate_clusters": 0, "duplicate_rows_cross_group": 0}
+    try:
+        X = np.asarray(ds.X, dtype=np.float64)
+        _, inv, counts = np.unique(X, axis=0, return_inverse=True, return_counts=True)
+        clusters = np.flatnonzero(counts > 1)
+        if clusters.size == 0:
+            return out
+        groups = np.asarray(ds.groups, dtype=object)
+        n_cross = 0
+        for c in clusters:
+            idx = np.flatnonzero(inv == c)
+            if len(pd.unique(groups[idx])) > 1:
+                # 只有"副本"（簇内除首行外的行）才算重复行，否则会把簇的原始行也计入，
+                # 报出 cross > duplicate_rows 的自相矛盾数（240 行重复却写 460 行跨组）。
+                n_cross += int(idx.size - 1)
+        out = {"duplicate_clusters": int(clusters.size), "duplicate_rows_cross_group": n_cross}
+    except Exception:  # noqa: BLE001 —— 纯诊断，算不出来不阻断审计
+        return out
+    return out
+
+
+def _batch_overlap(ds: Dataset, cfg: dict, max_rows: int = 3000) -> dict | None:
+    """批次之间的样品重叠：完全重复行 + 最近邻距离。
+
+    为什么必须在 audit 里做：`holdout_batch` / `loo_batch` 的全部说服力都来自
+    「测试批没见过」。但公开数据集里常见同一样品在两批里各测一次（Tecator 的
+    240 行里有 22 对重复光谱），此时所谓外部测试其实是内插，RPD 能报到 20+。
+    全表「完全重复行」只说明有重复，不说明重复**跨进了测试批**——这两件事
+    对结论的影响完全不同。
+    """
+    batch = getattr(ds, "batch", None)
+    if batch is None:
+        return None
+    batch = np.asarray(batch, dtype=object).astype(str)
+    uniq = list(pd.unique(batch))
+    if len(uniq) < 2:
+        return None
+    X = np.asarray(ds.X, dtype=np.float64)
+    if X.shape[0] > max_rows:
+        return {"skipped": f"行数 {X.shape[0]} > {max_rows}，未做跨批次近邻检查"}
+    split = cfg.get("split") or {}
+    strategy = str(split.get("strategy", "nested_group"))
+    focus = None
+    if strategy == "holdout_batch" and split.get("holdout_batch") is not None:
+        focus = str(split.get("holdout_batch"))
+
+    per: dict[str, dict[str, Any]] = {}
+    for b in uniq:
+        te = np.flatnonzero(batch == b)
+        tr = np.flatnonzero(batch != b)
+        if te.size == 0 or tr.size < 2:
+            continue
+        dmin = _nn_distances(X[te], X[tr])
+        exact = int(np.isclose(dmin, 0.0, atol=1e-9).sum())
+        # 训练集内部的最近邻距离 = 「正常间距」的基准；测试批比它还近，就是内插。
+        rng = np.random.default_rng(0)
+        sub = tr if tr.size <= 300 else rng.choice(tr, size=300, replace=False)
+        base = []
+        for j, r in enumerate(sub):
+            d = np.sqrt(((X[sub] - X[r]) ** 2).sum(1))
+            d[j] = np.inf
+            base.append(float(np.min(d)))
+        base_med = float(np.median(base))
+        med = float(np.median(dmin))
+        per[b] = {
+            "n_rows": int(te.size),
+            "exact_duplicates": exact,
+            "exact_rate": round(exact / max(1, int(te.size)), 4),
+            "nn_median": round(med, 4),
+            "train_nn_median": round(base_med, 4),
+            "nn_ratio": round(med / base_med, 3) if base_med > 0 else None,
+        }
+    if not per:
+        return None
+    inside = {b: v for b, v in per.items() if focus is None or b == focus}
+    return {
+        "strategy": strategy,
+        "focus_batch": focus,
+        "per_batch": per,
+        "n_exact_duplicates_in_focus": int(sum(v["exact_duplicates"] for v in inside.values())),
+        "min_nn_ratio_in_focus": (min([v["nn_ratio"] for v in inside.values()
+                                       if v.get("nn_ratio") is not None], default=None)),
+        "note": ("最近邻距离为原始特征空间的欧氏距离；nn_ratio = 测试批到训练批的中位最近邻距离 / "
+                 "训练集内部的中位最近邻距离，<1 说明测试批落在训练云内部"),
+    }
+
+
 def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) -> AuditReport:
     rep = AuditReport()
     gstats, ginfo = _group_structure(ds)
@@ -311,6 +415,8 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
 
     miss_frac = float(np.isnan(ds.X).mean()) if ds.n_features else 0.0
     dup_rows = int(ds.X.shape[0] - len(np.unique(np.asarray(ds.X, dtype=np.float64), axis=0)))
+    dup_info = _duplicate_structure(ds)
+    overlap = _batch_overlap(ds, cfg)
 
     summary = {
         "n_rows": ds.n_samples,
@@ -322,6 +428,7 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
         "source": ds.source_path,
         "missing_fraction": miss_frac,
         "duplicate_rows": dup_rows,
+        **dup_info,
         "n_constant_features": int(fissues["constant"].sum()),
         "n_near_zero_var": int(fissues["near_zero_var"].sum()),
         "cond_number": coll.get("cond"),
@@ -332,6 +439,7 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
         "collinear_pairs": coll.get("pairs", []),
         "group_structure": ginfo,
         "epv": epv,
+        "batch_overlap": overlap,
     }
     if ds.task == "regression":
         yv = np.asarray(ds.y, dtype=np.float64)
@@ -450,15 +558,47 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
             F.append(Finding(
                 "warn", "类别不平衡", key="imbalance",
                 detail=f"类别计数 {epv.get('class_counts')}，不平衡比 {ratio:.2f}",
-                action="主指标用 AUPRC / balanced accuracy / MCC，不要只看 accuracy；阈值用内层 CV 选 Youden 点",
+                action=("主指标用 AUPRC / balanced accuracy / MCC，不要只看 accuracy；"
+                        "管线硬标签指标固定 0.5 阈值（未做内层 Youden 选择），"
+                        "阈值敏感性见报告表 T8；若论文要声称阈值为 Youden，须自行在内层折选择并记录每折阈值"),
             ))
 
     if dup_rows:
-        F.append(Finding(
-            "warn", "完全重复行", key="dup_rows",
-            detail=f"{dup_rows} 行特征向量完全重复",
-            action="检查是否同一测量被重复录入；若确为独立重复测量，确保 sample_id 相同（分组会处理）",
-        ))
+        cross = int(dup_info.get("duplicate_rows_cross_group") or 0)
+        detail = f"{dup_rows} 行特征向量完全重复（{dup_info.get('duplicate_clusters', 0)} 组）"
+        if cross:
+            detail += f"，其中 {cross} 行的副本落在不同 group"
+            action = ("这 {cross} 行会被分组 CV 分到不同折：训练折里已有同一行，测试折等于抄答案，"
+                      "OOF 指标偏高。先去重（保留每组一行）再重跑，把两次结果并列报告"
+                      ).format(cross=cross)
+        else:
+            action = "检查是否同一测量被重复录入；若确为独立重复测量，确保 sample_id 相同（分组会处理）"
+        F.append(Finding("warn", "完全重复行", key="dup_rows", detail=detail, action=action))
+
+    # 跨批次重叠：决定 holdout_batch / loo_batch 的结论还算不算「外部验证」
+    if overlap and overlap.get("per_batch"):
+        focus = overlap.get("focus_batch")
+        scope = f"（本次作为测试批的 batch={focus}）" if focus else ""
+        n_exact = overlap.get("n_exact_duplicates_in_focus") or 0
+        ratio = overlap.get("min_nn_ratio_in_focus")
+        if n_exact:
+            worst = (int(overlap["per_batch"][focus]["n_rows"]) if focus else
+                     sum(v["n_rows"] for v in overlap["per_batch"].values()))
+            F.append(Finding(
+                "warn", "测试批与训练批存在完全重复样品", key="batch_dup",
+                detail=(f"{scope} 有 {n_exact} 行与训练批的光谱逐点相同"
+                        f"（占该批 {n_exact / max(1, worst):.1%}）"),
+                action=("该批不能当作独立外部测试：报告须改写为「批次内一致性」，"
+                        "或剔除重复样品后重跑，否则 RPD/RMSEP 会被近邻重叠抬高"),
+            ))
+        elif ratio is not None and ratio < 0.8:
+            F.append(Finding(
+                "warn", "测试批落在训练云内部（近邻重叠）", key="batch_overlap",
+                detail=(f"{scope} 测试批到训练批的中位最近邻距离只有训练集内部间距的 {ratio:.2f} 倍"
+                        f"（<0.8 说明测试点几乎被训练点夹住）"),
+                action=("外部测试接近内插：R²/RPD 会明显偏高，写论文时须说明测试批与训练批的"
+                        "谱空间重叠，不能把该数字当作外推精度"),
+            ))
 
     if miss_frac > 0:
         F.append(Finding(
@@ -537,6 +677,28 @@ def audit_dataset(ds: Dataset, cfg: dict, raw_df: pd.DataFrame | None = None) ->
                         "或只保留 AD 的定义与阈值描述、不宣称判别力；"
                         "n<5(p+1) 时 AD 结论只能视为探索性，不得写「模型可安全外推」"),
             ))
+
+    # 非数值列被静默丢弃：German Credit 20 列里 13 列是类别（A11/A12…），
+    # 旧版只留一条 info「载入说明」，报告正文照样写「1000 行 × 7 特征」，
+    # 读者不会意识到 65% 的列根本没进模型，AUC 从文献的 0.78 掉到 0.67 也无从解释。
+    dropped_cat = list(getattr(ds, "dropped_non_numeric", []) or [])
+    if dropped_cat:
+        n_used = int(ds.X.shape[1])
+        frac = len(dropped_cat) / max(1, n_used + len(dropped_cat))
+        F.append(Finding(
+            "warn" if len(dropped_cat) >= 3 else "info",
+            f"类别/非数值列被丢弃：{len(dropped_cat)} 列（占原始特征 {frac:.0%}），"
+            f"模型实际只用 {n_used} 列",
+            key="non_numeric_dropped",
+            detail=("这些列 dtype 不是数值、又没有写进 feature_cols，所以没有进入特征矩阵："
+                    f"{dropped_cat[:12]}" + ("…" if len(dropped_cat) > 12 else "")
+                    + "。若它们本应是类别特征（如 checking_status / purpose / housing），"
+                    "当前模型对它们完全不可见，任何「用了全部变量」的说法都不成立。"),
+            action=("先用 pd.get_dummies(..., drop_first=False) 把类别列展开成 0/1 列、"
+                    "或写 data.feature_cols 指向展开后的列，再重跑；"
+                    "整数编码的标称列（0/1/2…）不会被这里识别，同样必须显式 one-hot，"
+                    "否则会被当成有序数值、给出并不存在的「每升一级风险+Δ」结论"),
+        ))
 
     for note in ds.notes:
         F.append(Finding("info", "载入说明", key="io_note", detail=note))

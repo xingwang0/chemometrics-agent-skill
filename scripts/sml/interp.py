@@ -425,6 +425,14 @@ def band_permutation_importance(
     df["share"] = df["delta_mean"].clip(lower=0) / total if total > 0 else 0.0
     df["base_score"] = base_score
     df["rank"] = np.arange(1, len(df) + 1)
+    # 1.2.8：置换后的指标值本身要落盘。光谱块共线时，把一整段波长换成别的样品，
+    # 可能把 R² 打到 -490（ΔR²≈493）——数值是真的，但 R² 差值在这个量级上不可比，
+    # 报告照抄就成了「贡献最大的波段 ΔR²=493.9」。这里给出置换后指标与「已转负」标记，
+    # 报告据此改用「≥ base_score」的下界写法，排序仍按 ΔR²。
+    df["score_permuted"] = base_score - df["delta_mean"]
+    df["permuted_negative"] = df["score_permuted"] < 0
+    df.attrs["base_score"] = float(base_score)
+    df.attrs["n_permuted_negative"] = int(df["permuted_negative"].sum())
     df.attrs["mode"] = "all_rows" if all_rows else "test_fold"
     df.attrs["min_test_rows"] = int(min_test)
     # 全零意味着「置换没有产生任何信息」，不是「没有重要特征」：

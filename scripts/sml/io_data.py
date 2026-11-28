@@ -50,6 +50,10 @@ class Dataset:
     classes: list[str] | None = None
     positive_label: Any = None
     notes: list[str] = field(default_factory=list)
+    # 因 dtype 非数值而被丢弃的列（未 one-hot，也未出现在 feature_cols 里）。
+    # German Credit 这类「类别列以字符串/整数编码混在表里」的数据会触发；
+    # 审计必须把它升级成 warn，否则模型只用了 7/20 列而报告看上去一切正常。
+    dropped_non_numeric: list[str] = field(default_factory=list)
     source_path: str | None = None
     data_hash: str | None = None
     wavelength: np.ndarray | None = None
@@ -425,6 +429,7 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
         )
 
     explicit = data_cfg.get("feature_cols")
+    non_numeric_dropped: list[str] = []
     if explicit:
         missing = [c for c in explicit if c not in df.columns]
         if missing:
@@ -563,6 +568,7 @@ def load_dataset(cfg: dict, path: str | Path | None = None) -> tuple[Dataset, pd
         target_resolution=resolve_target_field(cfg, "target_resolution", target_col),
         task=task, classes=classes,
         positive_label=pos, notes=notes, source_path=str(p), data_hash=data_hash,
+        dropped_non_numeric=list(non_numeric_dropped),
         wavelength=wavelength, label_map=dict(label_map), targets=targets_dict,
         target_available=avail, target_lost=lost, dropped_all_targets=n_drop_all,
     )

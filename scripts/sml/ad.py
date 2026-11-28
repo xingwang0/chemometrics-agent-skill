@@ -540,6 +540,22 @@ def _ad_conclusions(res: dict[str, Any], task: str = "regression") -> tuple[str,
             "也不要用「剔除域外样本后性能更优」来论证外推能力。")
 
 
+def mixed_author_note(effective: list[str] | None = None, n_models: int | None = None) -> str:
+    """AD 结论按模型分裂时的作者提示。
+
+    1.2.8：旧实现只覆写了顶层 ``conclusion``，``author_note`` 仍原样保留第一个模型的
+    「AD 有效。可明确宣称……」，于是 report.md 的「写作提示」与同一节的「不一致」
+    结论自相矛盾（正是 1.2.5「Methods 取第一个模型」漏掉的另一半）。
+    两者必须由此函数统一生成。
+    """
+    names = "、".join(str(m) for m in (effective or [])) or "部分模型"
+    of = f"（{n_models} 个模型）" if n_models else ""
+    return (f"AD 结论按模型分裂{of}：只有 {names} 判定「有效」，可以写「域外预测不可靠」；"
+            f"其余模型必须把「AD 判据未显示判别力」写入 limitations。"
+            f"正文与 Methods 都要逐模型说明，禁止用一句话概称「AD 有效」或「AD 无效」，"
+            f"也不要用「剔除域外样品后性能更好」来论证外推能力。")
+
+
 def ad_summary_table(scores: pd.DataFrame,
                      degenerate: dict[str, str] | None = None) -> pd.DataFrame:
     """各 AD 方法的越界统计。主口径是**独立样品**，行口径另存一列备查。

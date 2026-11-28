@@ -188,6 +188,25 @@ def _fmt_p(v: Any) -> str:
     return present.fmt_p(v)
 
 
+def _lt0(v: Any) -> bool:
+    """v 是负数吗（None / NaN / 字符串一律当 False）。"""
+    try:
+        if v is None:
+            return False
+        x = float(v)
+        return bool(x < 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _looks_like_wavelength(name: Any) -> bool:
+    """特征名是否是波数/波长（纯数字且量级 ≥ 1）；表格数据的列名一般是 alcohol、cement。"""
+    try:
+        return abs(float(str(name).strip())) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _real_outer_folds(ds, cfg: dict) -> int:
     """报告里写的折数必须是**实际会跑**的折数（loo_batch=批次数、holdout=1）。"""
     from .cv import _outer_fold_count
@@ -252,6 +271,141 @@ def t2_columns(summary: pd.DataFrame) -> list[str]:
     return cols
 
 
+def _class_display(enc: Any, label_map: dict | None) -> str:
+    try:
+        k = int(enc)
+    except (TypeError, ValueError):
+        return str(enc)
+    return str((label_map or {}).get(k, k))
+
+
+def _classification_detail(ctx, best_model: str) -> dict[str, pd.DataFrame]:
+    """分类专属的两张表：OOF 混淆矩阵 + 逐类 precision/recall/F1/support。
+
+    为什么不并进 T2：T2 是「每个模型一行」的汇总口径；混淆矩阵回答的是完全不同的问题——
+    这个模型在哪些类别上根本没工作。UCI wine 六分类实测 rf accuracy 0.695，
+    但类别 3（n=10）与 8（n=18）的 OOF 召回都是 0：从不预测这两个类。
+    没有这张表，作者会拿 0.695 去对文献的 62.4%，却不知道自己只覆盖了 4 个主要等级。
+    """
+    oof = _read_csv_if(ctx.run_dir, "cv/oof_predictions.csv")
+    if oof.empty or not {"model", "y_true", "y_pred"}.issubset(oof.columns):
+        return {}
+    sub = oof[oof["model"].astype(str) == str(best_model)]
+    if sub.empty:
+        sub = oof[oof["model"].astype(str) == str(oof["model"].astype(str).iloc[0])]
+    yt = pd.to_numeric(sub["y_true"], errors="coerce")
+    yp = pd.to_numeric(sub["y_pred"], errors="coerce")
+    ok = yt.notna() & yp.notna()
+    if int(ok.sum()) == 0:
+        return {}
+    y_true = yt[ok].to_numpy(dtype=int)
+    y_pred = yp[ok].to_numpy(dtype=int)
+    labels = sorted(set(np.unique(y_true)) | set(np.unique(y_pred)))
+    lm = getattr(ctx.ds, "label_map", None)
+
+    from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    names = [_class_display(c, lm) for c in labels]
+    cm_df = pd.DataFrame(cm, columns=[f"预测 {n}" for n in names])
+    cm_df.insert(0, "真实\\预测", [f"真 {n}" for n in names])
+
+    p, r, f1, sup = precision_recall_fscore_support(
+        y_true, y_pred, labels=labels, zero_division=0)
+    # 逐类 OVRAUC：概率列 p0..pK 与编码后的类别一一对应
+    pcols = {int(c[1:]): c for c in sub.columns
+             if len(c) > 1 and c[0] == "p" and c[1:].isdigit()}
+    # 二分类的 OOF 只落一列正类概率（proba），没有 p0/p1：这里补齐，
+    # 否则逐类 AUROC 与阈值表 T8 都会静默变成空表。
+    if not pcols and "proba" in sub.columns and len(labels) == 2:
+        pcols = {1: "proba"}
+    aucs: list[float] = []
+    from sklearn.metrics import roc_auc_score
+
+    def _class_prob(c: int) -> np.ndarray | None:
+        col = pcols.get(int(c))
+        if col is not None:
+            return pd.to_numeric(sub[col], errors="coerce").to_numpy(dtype=float)
+        if int(c) == 0 and 1 in pcols:      # 二分：负类概率 = 1 − p(正类)
+            return 1.0 - pd.to_numeric(sub[pcols[1]], errors="coerce").to_numpy(dtype=float)
+        return None
+
+    for c in labels:
+        prob = _class_prob(c)
+        if prob is None:
+            aucs.append(float("nan"))
+            continue
+        ybin = (y_true == c).astype(int)
+        try:
+            aucs.append(float(roc_auc_score(ybin, prob)) if ybin.min() != ybin.max()
+                        else float("nan"))
+        except ValueError:
+            aucs.append(float("nan"))
+    rep = pd.DataFrame({
+        "类别": names,
+        "OOF 行数(support)": sup.astype(int),
+        "precision": np.round(p, 4),
+        "recall": np.round(r, 4),
+        "F1": np.round(f1, 4),
+        "AUROC(OVR)": np.round(aucs, 4),
+    })
+
+    # 二分类的阈值敏感性：管线里所有硬标签指标都是 0.5 阈值，而审计一直在建议
+    # 「用 Youden 点」。不给出这张表，作者就只能在论文里写一句没法复核的话。
+    thr_df = _threshold_sensitivity(y_true, sub, pcols)
+    out = {"T7_confusion": cm_df, "T7b_class_report": rep}
+    if thr_df is not None:
+        out["T8_threshold"] = thr_df
+    return out
+
+
+def _threshold_sensitivity(y_true: np.ndarray, sub: pd.DataFrame,
+                           pcols: dict[int, str]) -> pd.DataFrame | None:
+    """二分类：同一组 OOF 概率在 0.5 / Youden / 先验 三个阈值下的指标。"""
+    if len(np.unique(y_true)) != 2 or 1 not in pcols:
+        return None
+    prob = pd.to_numeric(sub[pcols[1]], errors="coerce").to_numpy(dtype=float)
+    mask = np.isfinite(prob)
+    y, p = y_true[mask].astype(int), prob[mask]
+    if len(np.unique(y)) != 2:
+        return None
+    from sklearn.metrics import confusion_matrix, matthews_corrcoef
+
+    from .metrics import _youden_threshold
+
+    prev = float(np.mean(y))
+
+    def _at(t: float) -> dict[str, Any]:
+        yh = (p >= float(t)).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y, yh, labels=[0, 1]).ravel()
+        sens = float(tp / (tp + fn)) if (tp + fn) else float("nan")
+        spec = float(tn / (tn + fp)) if (tn + fp) else float("nan")
+        return {
+            "阈值": round(float(t), 4),
+            "sensitivity": round(sens, 4),
+            "specificity": round(spec, 4),
+            "balanced_accuracy": round(float(np.nanmean([sens, spec])), 4),
+            "F1(正类)": round(float(2 * tp / (2 * tp + fp + fn)) if (2 * tp + fp + fn) else 0.0, 4),
+            "MCC": round(float(matthews_corrcoef(y, yh)) if len(np.unique(yh)) > 1 else 0.0, 4),
+            "accuracy": round(float((tp + tn) / len(y)), 4),
+        }
+
+    youden = _youden_threshold(y, p)
+    rows = [
+        {"阈值口径": "0.5（管线主指标，全部 T2/T7 表由此得出）", **_at(0.5)},
+        {"阈值口径": "Youden（在这份 OOF 上事后选，乐观偏差）", **_at(youden)},
+        {"阈值口径": "先验（= 正类占比，等价于「按基础发生率报警」）", **_at(prev)},
+    ]
+    return pd.DataFrame(rows)
+
+
+def _classes_never_predicted(rep: pd.DataFrame) -> list[str]:
+    if rep is None or rep.empty or "recall" not in rep.columns:
+        return []
+    bad = rep[pd.to_numeric(rep["recall"], errors="coerce").fillna(0) <= 0.05]
+    return bad["类别"].astype(str).tolist()
+
+
 def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
     """T1 数据审计 / T2 性能+CI / T3 逐折 / T4 模型比较 / T5 适用域 / T6 重要性。"""
     run = ctx.run_dir
@@ -277,6 +431,10 @@ def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
         t2 = summary[t2_columns(summary)].copy()
         t2 = _attach_ci(t2, ci)
         tables["T2_performance"] = t2
+
+    # T7：分类细则（仅分类任务）
+    if getattr(ctx.ds, "task", "") == "classification":
+        tables.update(_classification_detail(ctx, best_model))
 
     # T3：逐折
     folds = _read_csv_if(run, "cv/fold_results.csv")
@@ -357,6 +515,49 @@ def build_tables(ctx, best_model: str) -> dict[str, pd.DataFrame]:
         except Exception as exc:  # noqa: BLE001
             warn(f"xlsx 写出失败（CSV 仍然可用）：{type(exc).__name__}: {exc}")
     return tables
+
+
+def _md_table(df: pd.DataFrame, digits: int = 3) -> list[str]:
+    """把 DataFrame 摊成 Markdown 表；数值统一 _fmt，避免 0.6950000001 这种尾巴。"""
+    head = list(df.columns)
+    out = ["| " + " | ".join(str(h) for h in head) + " |", "|" + "---|" * len(head)]
+    for _, r in df.iterrows():
+        cells = []
+        for c in head:
+            v = r[c]
+            if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+                cells.append(_fmt(v, digits))
+            else:
+                cells.append(str(v))
+        out.append("| " + " | ".join(cells) + " |")
+    out.append("")
+    return out
+
+
+def _append_class_detail(lines: list[str], tables: dict, best_model: str) -> None:
+    cm = tables.get("T7_confusion")
+    rep = tables.get("T7b_class_report")
+    if cm is None or cm.empty:
+        return
+    lines.append(f"**分类细则**（OOF 池化，模型 `{best_model}`；行归一化比例 = 逐类召回，见图 F9）：")
+    lines.append("")
+    lines.extend(_md_table(cm, 0))
+    if rep is not None and not rep.empty:
+        lines.extend(_md_table(rep, 3))
+        bad = _classes_never_predicted(rep)
+        if bad:
+            lines.append(f"> **⚠ 类别 {('、'.join(bad))} 的 OOF 召回 ≤ 0.05**：模型几乎/从不预测这些类。"
+                         "accuracy 由多数类主导，不能据此声称「能识别全部等级」；"
+                         "论文须同时报 macro-F1 与逐类召回，或把稀有类合并后重定义任务。")
+            lines.append("")
+    th = tables.get("T8_threshold")
+    if th is not None and not th.empty:
+        lines.append("**阈值敏感性**（同一组 OOF 概率，只换判正阈值；管线主指标固定 0.5）：")
+        lines.append("")
+        lines.extend(_md_table(th))
+        lines.append("> Youden 一行是在这份 OOF 上事后挑的，含乐观偏差；它只能说明「阈值换一下指标会明显变」，"
+                     "不能当作可外推的性能。论文若声称用了 Youden，必须在内层折上选阈值、记录每折阈值后再报指标。")
+        lines.append("")
 
 
 # --------------------------------------------------------------------------- #
@@ -781,8 +982,8 @@ def build_reviewer_checklist(ctx, block: dict, perm: dict, ad_eval: dict,
         ("为什么不用 PLS？",
          "PLS 为强制基线（缺失时自动注入），并给 VIP 分数",
          "interp/vip.csv",
-         ("⚠ VIP 不可引用：来源 PLS 的 CV R²="
-          f"{_fmt(vip_info.get('pls_cv_r2'), 3)} < {_fmt(vip_info.get('min_pls_r2'), 2)}，"
+         (f"⚠ VIP 不可引用：来源 PLS 的 CV {vip_info.get('pls_metric_label', 'R²')}="
+          f"{_fmt(vip_info.get('pls_value'), 3)} < {_fmt(vip_info.get('threshold'), 2)}，"
           "请改用置换重要性/SHAP")
          if vip_info and vip_info.get("reliable") is False else "✓"),
         ("预测值有没有跑出目标量纲？",
@@ -909,11 +1110,36 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     if not (ds.groups_per_sample().max() > 1):
         lim.append("数据中每个样品仅一次测量，无法体现分组交叉验证相对随机划分的优势；"
                    "若实际存在重复测量，请补充 sample_id。")
+    dropped_cat = list(getattr(ds, "dropped_non_numeric", []) or [])
+    if dropped_cat:
+        lim.append(f"**特征矩阵只用了 {int(ds.X.shape[1])} 列**：另有 {len(dropped_cat)} 列类别/非数值列"
+                   f"（{dropped_cat[:8]}{'…' if len(dropped_cat) > 8 else ''}）因未 one-hot 被丢弃，"
+                   "模型对这些变量完全不可见；任何「已使用全部变量」的表述都不成立。"
+                   "若要纳入，请先展开成 0/1 列再重跑（详见审计 WARN）。")
+    strategy = str((cfg.get("split") or {}).get("strategy", "nested_group"))
     if ds.batch is None:
         lim.append("数据未提供批次/仪器信息，模型仅在当前批次内验证，**跨批次外推未经验证**。")
+    elif strategy == "holdout_batch":
+        lim.append(f"外部测试为留一批次（batch={cfg['split'].get('holdout_batch')}），"
+                   "训练折不含该批；若同一样品在其它批次有复测，样品级泄漏仍可能留在训练折内。")
+    elif strategy == "loo_batch":
+        lim.append(f"外部验证为留一批次（共 {len(pd.unique(ds.batch))} 个批次，逐批外推），"
+                   "结论只覆盖这些批次，新批次仍需重新验证。")
     else:
         lim.append(f"数据含 {len(pd.unique(ds.batch))} 个批次，但本次未执行留一批次外部验证"
                    f"（可另跑 `--set split.strategy=loo_batch`）。")
+    _overlap = (audit.get("summary") or {}).get("batch_overlap") or {}
+    if _overlap.get("n_exact_duplicates_in_focus"):
+        _focus = _overlap.get("focus_batch")
+        _scope = f"batch={_focus} " if _focus else ""
+        lim.append(f"{_scope}测试批中有 {_overlap['n_exact_duplicates_in_focus']} 行与训练批"
+                   "光谱逐点相同（审计已标记）：该批不是独立外部测试，"
+                   "其 R²/RMSEP 只能作为批次内一致性参考。")
+    elif (_overlap.get("min_nn_ratio_in_focus") is not None
+          and _overlap["min_nn_ratio_in_focus"] < 0.8):
+        lim.append(f"测试批到训练批的中位最近邻距离仅为训练集内部间距的 "
+                   f"{_overlap['min_nn_ratio_in_focus']:.2f} 倍（审计已标记）："
+                   "外部测试接近内插，性能数字不能当作外推精度。")
     if ds.n_groups < 30:
         lim.append(f"独立样品仅 {ds.n_groups} 个，性能估计的置信区间较宽，不宜据此宣称模型已定型。")
     if ad_eval and ad_eval.get("per_model"):
@@ -934,6 +1160,12 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                        "因此本研究不对域外样品的外推可靠性作出结论。")
     if perm and perm.get("fixed_hyperparams"):
         lim.append("Y-randomization 采用固定超参（保守估计），未对每轮置换重做内层调参。")
+    _dup_cross = int((audit.get("summary") or {}).get("duplicate_rows_cross_group") or 0)
+    if _dup_cross:
+        # 有重复行、且每行各自一个 sample_id：分组 CV 也拦不住，同一特征向量会跨折出现。
+        lim.append(f"数据中有 {_dup_cross} 行的特征向量与另一行完全重复，且副本落在不同 group："
+                   "分组交叉验证无法排除这类重复行，本章 OOF 指标可能偏乐观，"
+                   "应以去重后的敏感性结果作为保守下界。")
     if (ad_eval and ad_eval.get("per_model")) or _read_json_if(ctx.run_dir, "interp/interp.json"):
         lim.append("适用域（T²/Q/kNN/leverage）与重要性（置换/系数/VIP/SHAP）均在**全量数据**上拟合，"
                    "属 in-sample 描述性分析：它们只用于划定域边界与解释模型，"
@@ -1023,6 +1255,13 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
         lines.append(f"- 交叉验证性能：AUROC = {_fmt(block.get('auc'), 3)}，"
                      f"平衡准确率 = {_fmt(block.get('balanced_accuracy'), 3)}，"
                      f"F1(macro) = {_fmt(block.get('f1_macro'), 3)}，MCC = {_fmt(block.get('mcc'), 3)}")
+        _rep = tables.get("T7b_class_report")
+        _bad = _classes_never_predicted(_rep)
+        if _bad:
+            # 摘要是最常被抄进论文的一段：稀有类召回为 0 这件事必须写在这里，
+            # 否则读者只看到 AUROC 0.855 就以为「六个等级都能识别」。
+            lines.append(f"- ⚠️ **类别 {('、'.join(_bad))} 的 OOF 召回 ≤ 0.05**：模型几乎/从不预测这些类，"
+                         "上列 accuracy 与 AUROC 只对主要类别成立；逐类召回见第四章 T7b 与图 F9。")
     # 两个口径给出的「第一」不同时必须说出来：报告只写一个模型名，读者无从知道另一个口径选了谁
     if (not summary.empty and ds.task == "regression"
             and "r2_mean" in summary.columns and "r2" in summary.columns):
@@ -1081,7 +1320,17 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     lines.append("")
     plan = _read_json_if(ctx.run_dir, "cv/cv_summary.json")
     lines.append(f"- 策略：`{cfg['split']['strategy']}`（{_read_json_if(ctx.run_dir, 'audit/audit.json').get('recommendations', {}).get('group_col', 'sample_id')} 分组）")
-    lines.append(f"- 外层：{cfg['split']['outer']['n_splits']} 折分组 CV × 重复 {cfg['split']['repeats']} 次（不同种子）")
+    # 外层折数必须写实际会跑的折数：holdout_batch / loo_batch / holdout_random 都不是
+    # cfg 里的 outer.n_splits（旧实现照抄，Tecator 的留一批次被写成「5 折分组 CV」）。
+    _n_outer = int(plan.get("n_outer_folds") or _real_outer_folds(ds, cfg))
+    _n_rep = int(plan.get("effective_repeats") or cfg["split"].get("repeats", 1))
+    _strat = cfg["split"]["strategy"]
+    _outer_txt = {
+        "holdout_batch": f"留一批次（batch={cfg['split'].get('holdout_batch')}）作外部测试：{_n_outer} 折",
+        "loo_batch": f"留一批次外推：{_n_outer} 折（逐批外推）",
+        "holdout_random": f"单次留出（test_size={cfg['split'].get('test_size', 0.2)}）：{_n_outer} 折",
+    }.get(_strat, f"{_n_outer} 折分组 CV")
+    lines.append(f"- 外层：{_outer_txt} × 重复 {_n_rep} 次（不同种子）")
     lines.append(f"- 内层：{cfg['split']['inner']['n_splits']} 折分组 CV 用于调参与预处理选择")
     lines.append(f"- 模型：{', '.join(summary['model'].tolist()) if not summary.empty else best_model}")
     lines.append(f"- 总拟合次数：{plan.get('total_fit_calls', '—')}"
@@ -1095,7 +1344,7 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     lines.append("")
     if not summary.empty:
         show = [c for c in ("model", "prep_mix", "prep", "n_repeats") if c in summary.columns]
-        for m in ("r2", "rmse", "mae", "rpd", "auc", "balanced_accuracy", "mcc"):
+        for m in ("r2", "rmse", "mae", "rpd", "accuracy", "auc", "balanced_accuracy", "mcc"):
             if f"{m}_mean" in summary.columns:
                 show += [f"{m}_mean", f"{m}_sd"]
         pooled_rows = (summary["metric_basis"].astype(str).eq("pooled")
@@ -1190,11 +1439,17 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                          f"BH 校正 p = {_fmt_p(_sig['p_bh'])}。本表不支持「{best_model} 唯一最优」的排序；"
                          f"论文中应写「二者性能相当」，配对比较见 `cv/comparison.csv`（表 T4）。")
             lines.append("")
+        if ds.task == "classification":
+            _append_class_detail(lines, tables, best_model)
     figs_present = sorted(figures.keys())
     if figs_present:
         lines.append("可用图：")
         for code in figs_present:
-            lines.append(f"- **{code}** {FIGURE_INDEX.get(code, '')} → `figures/{code}*`")
+            desc = FIGURE_INDEX.get(code, "")
+            if code == "F7" and not any(_looks_like_wavelength(n) for n in ds.feature_names):
+                # 表格数据（alcohol/cement）没有波数轴，也没法画平均谱底图。
+                desc = "重要性-特征排序（逐列置换；表格数据无波数可映射，底图为无谱柱状）"
+            lines.append(f"- **{code}** {desc} → `figures/{code}*`")
         lines.append("")
 
     lines.append("## 五、模型比较与不确定度")
@@ -1221,6 +1476,14 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
                      f"95% 区间 [{_fmt(perm.get('null_q025'), 4)}, {_fmt(perm.get('null_q975'), 4)}]")
         lines.append(f"- 观测值：{_fmt(perm.get('observed'), 4)}；p = {_fmt_p(perm.get('p_value'))}"
                      f"（n_perm={perm.get('n_perm')}）")
+        _np = perm.get("n_perm")
+        _p = perm.get("p_value")
+        if _np and _p is not None:
+            _floor = 1.0 / (1.0 + float(_np))
+            if float(_p) <= _floor * 1.0001:
+                lines.append(f"- ⚠ p = {_floor:.4f} 是 n_perm={int(_np)} 时的**最小可能值**"
+                             f"（1/(1+n_perm)）；真实 p 只会更小，此处的 0.02 不能读作「刚好显著」，"
+                             "要分辨更小的 p 必须增加置换次数（200 次 → 0.005，1000 次 → 0.001）")
         lines.append(f"- 结论：{perm.get('conclusion')}")
     else:
         lines.append("未执行或执行失败。")
@@ -1262,21 +1525,46 @@ def build_report(ctx, best_model: str, block: dict, tables: dict, figures: dict,
     interp = _read_json_if(ctx.run_dir, "interp/interp.json")
     if interp:
         tops = interp.get("top_bands") or []
+        # 表格数据（特征名是 alcohol / cement 这类词）没有"波段"，分类任务的置换指标是
+        # AUROC 而不是 R² —— 旧实现两处都写死成「波段 / ΔR²」，在非光谱、分类场景直接说错。
+        _spectral = any(_looks_like_wavelength(n) for n in ds.feature_names)
+        _unit = "波段" if _spectral else "特征"
+        _grp = "该段" if _spectral else "该特征"
+        _mlab = "AUROC" if ds.task == "classification" else "R²"
+        _dlab = "ΔAUROC" if ds.task == "classification" else "ΔR²"
         if interp.get("degenerate"):
-            lines.append("**重要性不可用**：置换前后指标没有变化（ΔR² 全为 0），"
+            lines.append(f"**重要性不可用**：置换前后指标没有变化（{_dlab} 全为 0），"
                          "本章不给出特征排序。")
             lines.append(f"- 原因：{interp.get('degenerate_note') or '置换没有产生信息'}")
             lines.append("- 处置：换验证方案（如 3 折 × 多次重复）或增大折内测试样品数后重跑 interp 阶段；"
                          "不要把 0.0000 当作「没有重要特征」写进论文。")
         elif tops:
-            lines.append("贡献最大的波段（打乱该段后的 R² 下降）：")
+            lines.append(f"贡献最大的{_unit}（打乱{_grp}后的 {_mlab} 下降）：")
+            base = interp.get("base_score")
+            n_neg = int(interp.get("n_permuted_negative") or 0)
             for t in tops[:8]:
-                lines.append(f"- **{t.get('label')}**：ΔR² = {_fmt(t.get('delta_mean'), 4)}"
-                             f"（占正贡献的 {_fmt((t.get('share') or 0) * 100, 1)}%）")
+                share_txt = f"（占正贡献的 {_fmt((t.get('share') or 0) * 100, 1)}%）"
+                ps = t.get("score_permuted")
+                if bool(t.get("permuted_negative")) or _lt0(ps):
+                    # 置换后指标转负：差值 ≥ 基准分，绝对值没有可比性（493.9 这类数
+                    # 不是「重要性」，而是「打乱该段后模型整体失效」）。
+                    b = _fmt(base, 4) if base is not None else "—"
+                    lines.append(f"- **{t.get('label')}**：{_dlab} ≥ {b}"
+                                 f"（置换后 {_mlab} 已转负：{_grp}被换掉后模型整体失效，"
+                                 f"数值不可比较）{share_txt}")
+                else:
+                    lines.append(f"- **{t.get('label')}**：{_dlab} = {_fmt(t.get('delta_mean'), 4)}"
+                                 f"{share_txt}")
+            if n_neg:
+                lines.append("")
+                lines.append(f"> 共 {n_neg} 个{_unit}的置换把 {_mlab} 打到负值。这些{_unit}的 "
+                             f"{_dlab} 只能读作「模型依赖它们」，不能与其它{_unit}比大小；"
+                             f"引用时写成「≥ 基准 {_mlab}」，排序仍按 {_dlab} 进行。")
             if interp.get("mode") == "all_rows":
                 lines.append("")
                 lines.append("> 本节重要性用**全样本置换**计算（每折只有 1 个测试样品时，"
-                             "对单行置换是恒等操作）；ΔR² 含内样本偏差，只能用于特征排序，"
+                             "对单行置换是恒等操作）；"
+                             f"{_dlab} 含内样本偏差，只能用于特征排序，"
                              "不能当作外推性能的一部分。")
         vip = interp.get("vip") or {}
         if vip:

@@ -326,10 +326,11 @@ def _ece(y: np.ndarray, proba: np.ndarray, n_bins: int = 10) -> float:
 def _youden_threshold(y: np.ndarray, proba: np.ndarray) -> float:
     """在给定数据上取 Youden 指数最大的阈值。
 
-    ⚠ **本函数当前没有任何调用点。** `classification_metrics(threshold=...)` 也无人传值，
-    所以管线里全部分类指标都是 0.5 阈值下的结果。要启用 Youden，必须在 `cv.py` 里
-    用**训练折**的概率算阈值、随折落盘再喂给测试折（不能在测试折上调，那是泄漏），
-    并在 `fold_results.csv` 里记录该阈值——没做这三步之前，论文里不得声称用了 Youden。
+    当前唯一调用点是报告层的**阈值敏感性表 T8**（在 OOF 概率上事后选阈值，仅用于
+    说明"换个阈值指标会怎么变"，含乐观偏差）。管线里 T2/T7 的全部硬标签指标仍然是
+    0.5 阈值。要真正启用 Youden，必须在 `cv.py` 里用**训练折/内层折**的概率算阈值、
+    随折落盘再喂给测试折（不能在测试折上调，那是泄漏），并在 `fold_results.csv` 里
+    记录该阈值——没做这三步之前，论文里不得声称用了 Youden。
     """
     order = np.argsort(-proba)
     y_sorted = y[order]

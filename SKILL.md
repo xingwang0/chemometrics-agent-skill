@@ -2,7 +2,7 @@
 name: research-ml-modeling
 description: "Reviewer-grade ML modelling for NIR/FTIR/Raman/XRD/XPS/UV-Vis spectra and tabular regression or classification: grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), RPD/RPIQ/VIP, PLS/PCR baselines, cluster bootstrap confidence intervals, publication-quality figures, Methods draft, reviewer rebuttal checklist. Use when the user asks for chemometrics or NIR/FTIR/Raman/XRD modelling, a PLS or PCR calibration, an applicability domain or Williams plot, a permutation test, RPD/VIP, or is answering reviewers about data leakage, overfitting, repeated measurements or batch effects. 科研级机器学习预测建模：近红外 NIR、红外 FTIR、拉曼 Raman、XRD、XPS、UV-Vis 光谱建模，配方/工艺参数等表格数据的回归与分类，论文 Methods 撰写，审稿质疑回应，RPD / VIP / 适用域 / 置换检验 / 分组交叉验证 / 数据泄漏。"
 description_en: "Reviewer-grade machine-learning predictive modelling for materials, chemistry and spectroscopy (NIR, FTIR, Raman, XRD, XPS, UV-Vis) and general tabular regression/classification. Provides grouped and nested cross-validation, repeated CV, Y-randomization permutation tests, applicability domain (Hotelling T2, Q residuals, kNN distance, Williams leverage), calibration, cluster-bootstrap confidence intervals, multiple-comparison correction, publication-quality figures, a draft Methods paragraph and a reviewer-response checklist."
-version: "1.2.7"
+version: "1.2.10"
 license: "Apache-2.0"
 license_url: "https://www.apache.org/licenses/LICENSE-2.0"
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
